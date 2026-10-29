@@ -1,0 +1,33 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+myenv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local vector database
+data/knowledge_base/chroma_db/
+
+# Private or uploaded medical documents
+uploads/
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+
+# IDE and operating system files
+.vscode/
+.DS_Store
+Thumbs.db
