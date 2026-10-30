@@ -1,35 +1,25 @@
 
-# Environment variables and secrets
+# Environment and secrets
 .env
-.env.*
-!.env.example
-
-# Python virtual environments
 .venv/
-myenv/
 venv/
 
-# Python cache files
+# Python cache
 __pycache__/
 *.py[cod]
-.pytest_cache/
 
-# Local vector database
+# Local database
 data/knowledge_base/chroma_db/
 
-# Private or uploaded medical documents
-uploads/
-*.pdf
-*.jpg
-*.jpeg
-*.png
-*.tif
-*.tiff
-*.bmp
+# Downloaded datasets
+data/datasets/
 
-# IDE and operating system files
-.vscode/
+# Temporary files
+*.log
 .DS_Store
 Thumbs.db
 
-data/datasets/ekacare/
+# Test uploads
+uploads/
+# Medical reference PDFs
+data/knowledge_base/documents/
