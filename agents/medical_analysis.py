@@ -4,6 +4,7 @@ import os
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
 from utils.rag_helper import retrieve_documents
 
@@ -18,7 +19,10 @@ def get_gemini_client():
             "GEMINI_API_KEY was not found. Check your .env file."
         )
 
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=180000)
+    )
 
 
 def build_medical_context(results: list[dict]) -> str:
@@ -38,7 +42,7 @@ def build_medical_context(results: list[dict]) -> str:
             "and factors that may affect this test"
         )
 
-        retrieved = retrieve_documents(query, top_k=2)
+        retrieved = retrieve_documents(query, top_k=1)
 
         references = []
 
@@ -47,7 +51,7 @@ def build_medical_context(results: list[dict]) -> str:
 
             references.append({
                 "source": metadata.get("source", "Unknown source"),
-                "content": result.get("document", "")
+                "content": result.get("document", "")[:1000]
             })
 
         context_sections.append({
@@ -92,8 +96,7 @@ def medical_analysis_agent(parsed_report: dict) -> dict:
     prompt = f"""
 You are the medical report explanation component of MediLens-AI.
 
-Your task is to explain extracted medical report information
-in simple, understandable language.
+Explain extracted medical report information in simple language.
 
 IMPORTANT RULES:
 
@@ -105,18 +108,21 @@ IMPORTANT RULES:
    Never silently correct or invent them.
 5. If needs_review is true, clearly mention that the value
    requires verification against the original report.
-6. Do not assume that a value is abnormal based only on a
+6. Do not assume a value is abnormal based only on a
    general reference document.
-7. Prefer the reference range printed in the patient's report.
-8. Use retrieved references only when relevant. Do not invent
-   facts or citations.
-9. If the available information is insufficient, say so.
-10. Recommend a general physician for further interpretation
-    when appropriate.
+7. Prefer the reference range printed in the report.
+8. Use retrieved references only when relevant.
+   Do not invent facts or citations.
+9. If information is insufficient, clearly say so.
+10. Recommend general physician review when appropriate.
 11. Add an Advanced Care department only when the report
-    evidence strongly supports further evaluation by that
-    department. Do not name or recommend individual doctors.
+    evidence strongly supports further evaluation.
+    Do not recommend individual doctors.
 12. Do not provide treatment instructions or medication doses.
+13. Do not treat OCR flags or reference-status labels as
+    confirmed clinical interpretations.
+14. If OCR verification is required, do not present the
+    finding as a confirmed abnormality.
 
 EXTRACTED REPORT INFORMATION AND RETRIEVED REFERENCES:
 
@@ -148,29 +154,42 @@ Return ONLY valid JSON using this structure:
     "disclaimer": "This is educational information, not a diagnosis."
 }}
 
-If no specialist department is clearly supported, set
-advanced_care to null.
+If no specialist department is clearly supported,
+set advanced_care to null.
 
-Do not treat OCR flags or reference-status labels as a confirmed
-clinical interpretation.
+If information is insufficient, explain the limitation.
+Do not invent missing values or reference ranges.
 """
+
 
     client = get_gemini_client()
 
-    response = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents=prompt,
-    config={
-        "response_mime_type": "application/json"
-    }
-)
-    
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config={
+                "response_mime_type": "application/json"
+            }
+        )
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Gemini API request failed: {str(e)}"
+        ) from e
+
+    if not response.text:
+        raise ValueError("Gemini returned an empty response.")
 
     try:
         analysis = json.loads(response.text)
+
     except (json.JSONDecodeError, TypeError):
         raise ValueError(
-            "Gemini returned an invalid response. Please try again."
+            "Gemini returned an invalid JSON response. Please try again."
         )
+
+    if not isinstance(analysis, dict):
+        raise ValueError("Gemini returned an unexpected response format.")
 
     return analysis
