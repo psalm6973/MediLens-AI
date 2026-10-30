@@ -5,11 +5,14 @@ import pymupdf
 import pytesseract
 from PIL import Image, ImageOps
 
+from utils.ocr_selector import select_psm
+
 
 # Tesseract installation on Windows.
 pytesseract.pytesseract.tesseract_cmd = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
+
 
 # Supported image formats.
 SUPPORTED_IMAGE_TYPES = {
@@ -21,12 +24,10 @@ SUPPORTED_IMAGE_TYPES = {
     ".bmp",
 }
 
-# Selected OCR configuration from our experiments.
-OCR_CONFIG = "--oem 3 --psm 3"
-
 
 def extract_text_from_pdf(file_path: str) -> str:
     """Extract text from a PDF, using OCR for scanned pages."""
+
     path = Path(file_path)
 
     if not path.is_file() or path.suffix.lower() != ".pdf":
@@ -36,6 +37,7 @@ def extract_text_from_pdf(file_path: str) -> str:
 
     with pymupdf.open(path) as document:
         for page in document:
+
             # First, try extracting selectable PDF text.
             text = page.get_text().strip()
 
@@ -54,10 +56,14 @@ def extract_text_from_pdf(file_path: str) -> str:
 
                 image = ImageOps.grayscale(image)
 
+                # Select OCR mode automatically.
+                psm, reason = select_psm(image)
+                print(f"PDF Page {page.number + 1}: PSM {psm} ({reason})")
+
                 text = pytesseract.image_to_string(
                     image,
                     lang="eng",
-                    config=OCR_CONFIG,
+                    config=f"--oem 3 --psm {psm}",
                 ).strip()
 
             if text:
@@ -70,6 +76,7 @@ def extract_text_from_pdf(file_path: str) -> str:
 
 def extract_text_from_image(file_path: str) -> str:
     """Extract text from a medical report image using OCR."""
+
     path = Path(file_path)
 
     if not path.is_file():
@@ -79,14 +86,21 @@ def extract_text_from_image(file_path: str) -> str:
         raise ValueError("Unsupported image format.")
 
     with Image.open(path) as image:
-        # Correct image orientation when metadata is available.
+
+        # Correct image orientation.
         image = ImageOps.exif_transpose(image)
+
+        # Convert to grayscale.
         image = ImageOps.grayscale(image)
+
+        # Select OCR mode automatically.
+        psm, reason = select_psm(image)
+        print(f"Selected PSM: {psm} ({reason})")
 
         text = pytesseract.image_to_string(
             image,
             lang="eng",
-            config=OCR_CONFIG,
+            config=f"--oem 3 --psm {psm}",
         ).strip()
 
     return text
@@ -94,6 +108,7 @@ def extract_text_from_image(file_path: str) -> str:
 
 def extract_document_text(file_path: str) -> str:
     """Extract text from a supported medical document."""
+
     path = Path(file_path)
     extension = path.suffix.lower()
 
