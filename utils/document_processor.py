@@ -14,7 +14,6 @@ pytesseract.pytesseract.tesseract_cmd = (
 )
 
 
-# Supported image formats.
 SUPPORTED_IMAGE_TYPES = {
     ".png",
     ".jpg",
@@ -25,8 +24,34 @@ SUPPORTED_IMAGE_TYPES = {
 }
 
 
+def run_ocr(image: Image.Image) -> str:
+    """Run OCR on an image using the selected page segmentation mode."""
+
+    
+    image = ImageOps.autocontrast(image)
+
+    # Enlarge the image to improve OCR readability.
+    image = image.resize(
+    (image.width * 3, image.height * 3),
+    Image.Resampling.LANCZOS,
+   )
+
+    psm, reason = select_psm(image)
+    print(f"Selected PSM: {psm} ({reason})")
+    print("IMAGE SIZE:", image.size)
+    print("SELECTED PSM:", psm)
+
+    text = pytesseract.image_to_string(
+        image,
+        lang="eng",
+        config=f"--oem 3 --psm {psm}",
+    )
+
+    return text.strip()
+
+
 def extract_text_from_pdf(file_path: str) -> str:
-    """Extract text from a PDF, using OCR for scanned pages."""
+    """Extract selectable text or OCR scanned PDF pages."""
 
     path = Path(file_path)
 
@@ -38,10 +63,8 @@ def extract_text_from_pdf(file_path: str) -> str:
     with pymupdf.open(path) as document:
         for page in document:
 
-            # First, try extracting selectable PDF text.
             text = page.get_text().strip()
 
-            # If the page has no selectable text, use OCR.
             if not text:
                 pixmap = page.get_pixmap(
                     matrix=pymupdf.Matrix(2, 2),
@@ -54,14 +77,14 @@ def extract_text_from_pdf(file_path: str) -> str:
                     pixmap.samples,
                 )
 
-                image = ImageOps.grayscale(image)
-
-                # Select OCR mode automatically.
                 psm, reason = select_psm(image)
-                print(f"PDF Page {page.number + 1}: PSM {psm} ({reason})")
+                print(
+                    f"PDF Page {page.number + 1}: "
+                    f"PSM {psm} ({reason})"
+                )
 
                 text = pytesseract.image_to_string(
-                    image,
+                    ImageOps.grayscale(image),
                     lang="eng",
                     config=f"--oem 3 --psm {psm}",
                 ).strip()
@@ -75,7 +98,7 @@ def extract_text_from_pdf(file_path: str) -> str:
 
 
 def extract_text_from_image(file_path: str) -> str:
-    """Extract text from a medical report image using OCR."""
+    """Extract text from a medical report image."""
 
     path = Path(file_path)
 
@@ -85,23 +108,12 @@ def extract_text_from_image(file_path: str) -> str:
     if path.suffix.lower() not in SUPPORTED_IMAGE_TYPES:
         raise ValueError("Unsupported image format.")
 
-    with Image.open(path) as image:
+    with Image.open(path) as original_image:
 
-        # Correct image orientation.
-        image = ImageOps.exif_transpose(image)
+        image = ImageOps.exif_transpose(original_image)
+        image = image.convert("RGB")
 
-        # Convert to grayscale.
-        image = ImageOps.grayscale(image)
-
-        # Select OCR mode automatically.
-        psm, reason = select_psm(image)
-        print(f"Selected PSM: {psm} ({reason})")
-
-        text = pytesseract.image_to_string(
-            image,
-            lang="eng",
-            config=f"--oem 3 --psm {psm}",
-        ).strip()
+        text = run_ocr(image)
 
     return text
 

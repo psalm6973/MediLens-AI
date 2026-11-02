@@ -1,0 +1,175 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediLens AI | Report Results</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+
+<body>
+    <header class="navbar">
+        <a href="/" class="brand">
+            <span class="brand-icon">M</span>
+            <span>MediLens<span class="brand-ai"> AI</span></span>
+        </a>
+
+        <a href="/" class="nav-button">← New report</a>
+    </header>
+
+    <main class="results-main">
+        <section class="results-heading">
+            <span class="section-label">YOUR REPORT</span>
+            <h1>Report analysis</h1>
+            <p>Here is an explanation of the information extracted from your report.</p>
+        </section>
+
+        {% set analysis = result.get("analysis", {}) %}
+        {% set status = result.get("status", "error") %}
+
+        <section class="status-card">
+            {% if status == "success" %}
+                <span class="status-indicator success-indicator">✓</span>
+                <div>
+                    <strong>Analysis completed</strong>
+                    <p>{{ result.get("message", "The analysis workflow completed.") }}</p>
+                </div>
+            {% elif status == "needs_review" %}
+                <span class="status-indicator review-indicator">!</span>
+                <div>
+                    <strong>Further review required</strong>
+                    <p>{{ result.get("message", "This report requires further review.") }}</p>
+                </div>
+            {% else %}
+                <span class="status-indicator review-indicator">!</span>
+                <div>
+                    <strong>Analysis could not be completed</strong>
+                    <p>{{ result.get("message", "An error occurred while processing the report.") }}</p>
+                </div>
+            {% endif %}
+        </section>
+
+        {% if analysis %}
+            <section class="result-card">
+                <span class="section-label">OVERVIEW</span>
+                <h2>Report summary</h2>
+                <p class="result-paragraph">
+                    {{ analysis.get("summary", "No summary was provided.") }}
+                </p>
+            </section>
+
+            <section class="result-card">
+                <span class="section-label">OBSERVATIONS</span>
+                <h2>Reported findings</h2>
+
+                {% set findings = analysis.get("findings", []) %}
+
+                {% if findings %}
+                    <div class="findings-list">
+                        {% for finding in findings %}
+                            <div class="finding-row">
+                                <div>
+                                    <strong>
+                                        {{ finding.get("test_name", "Unnamed test") }}
+                                    </strong>
+                                    {% if finding.get("reference_range") %}
+                                        <p>Reference range: {{ finding.get("reference_range") }}</p>
+                                    {% endif %}
+                                </div>
+
+                                <span class="finding-value">
+                                    {{ finding.get("reported_value", "Not available") }}
+                                </span>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="result-paragraph">No findings are available.</p>
+                {% endif %}
+            </section>
+
+            <section class="result-card">
+                <span class="section-label">GENERAL INFORMATION</span>
+                <h2>General guidance</h2>
+
+                {% set guidance = analysis.get("general_guidance", []) %}
+
+                {% if guidance %}
+                    <ul class="guidance-list">
+                        {% for item in guidance %}
+                            <li>{{ item }}</li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p class="result-paragraph">No general guidance was provided.</p>
+                {% endif %}
+            </section>
+
+            {% if analysis.get("advanced_care") %}
+                <section class="result-card advanced-care-card">
+                    <span class="section-label">ADVANCED CARE</span>
+                    <h2>Department information</h2>
+                    <p class="result-paragraph">
+                        {{ analysis.get("advanced_care") }}
+                    </p>
+                </section>
+            {% endif %}
+        {% endif %}
+
+        {% if result.get("safety_check") %}
+            <section class="result-card safety-card">
+                <span class="section-label">SAFETY REVIEW</span>
+                <h2>Safety information</h2>
+
+                <p class="result-paragraph">
+                    {{ result["safety_check"].get("message", "Safety check information is available.") }}
+                </p>
+
+                {% if result.get("safety_flags") %}
+                    <ul class="guidance-list">
+                        {% for flag in result["safety_flags"] %}
+                            <li>{{ flag }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            </section>
+        {% endif %}
+
+        {% if result.get("status") == "needs_review" %}
+            <section class="review-note">
+                <strong>Please note</strong>
+                <p>
+                    The analysis requires further review. Do not rely on
+                    incomplete or uncertain information for health decisions.
+                    Consult a qualified healthcare professional.
+                </p>
+            </section>
+        {% endif %}
+
+        <section class="results-disclaimer">
+            MediLens AI provides educational information only. It does not
+            diagnose medical conditions or replace professional medical advice.
+            Please discuss your report with a qualified healthcare professional.
+        </section>
+
+        <div class="results-actions">
+            <a href="/" class="primary-button">Analyze another report →</a>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <a href="/" class="brand footer-brand">
+            <span class="brand-icon">M</span>
+            <span>MediLens<span class="brand-ai"> AI</span></span>
+        </a>
+        <span>Making medical information easier to understand.</span>
+        <span>© 2026 MediLens AI</span>
+    </footer>
+</body>
+</html>
