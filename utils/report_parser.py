@@ -4,286 +4,398 @@ from typing import Any
 import re
 
 
-UNIT_PATTERN = (
-    r"g/dL|mg/dL|g/L|mg/L|mmol/L|mmol/mol|"
-    r"umol/L|µmol/L|mIU/L|mIU/mL|IU/L|U/L|"
-    r"ng/mL|pg/mL|cells/µL|cells/uL|/µL|/uL|%"
-    r"|RATIO"
+# ============================================================
+# 1. PATTERNS
+# ============================================================
+
+NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
+
+ROW_RE = re.compile(
+    rf"^(?P<left>.*?)\s+"
+    rf"(?P<value>{NUMBER})\s+"
+    rf"(?P<right>.*)$"
 )
-UNIT_RE = re.compile(UNIT_PATTERN, re.IGNORECASE)
-
-
-VALUE_RE = re.compile(
-    r"^(?P<comparator><=|>=|<|>|≤|≥)?\s*"
-    r"(?P<number>-?\d[\d,]*(?:\.\d+)?)$"
-)
-
 
 RANGE_RE = re.compile(
-    r"(?P<low>-?\d[\d,]*(?:\.\d+)?)"
-    r"\s*(?:-|–|—|to)\s*"
-    r"(?P<high>-?\d[\d,]*(?:\.\d+)?)",
-    re.IGNORECASE,
+    rf"(?P<low>{NUMBER})\s*(?:-|–|—|to)\s*(?P<high>{NUMBER})",
+    re.IGNORECASE
 )
 
-
-# Supports symbols and OCR wording such as "< or = 0.30"
-LIMIT_RE = re.compile(
-    r"(?P<comparator><\s*or\s*=|>\s*or\s*=|<=|>=|<|>|≤|≥)"
-    r"\s*(?P<value>\d[\d,]*(?:\.\d+)?)",
-    re.IGNORECASE,
+UNIT_RE = re.compile(
+    r"g/dl|g/di|g/l|gif|mg/dl|mg/d!|umol/l|umol/i|"
+    r"µmol/l|u/l|ua|iu/l|ius|iuu/l|1uU/|%"
+    r"g/dl|g/di|g/l|gil|gif|mg/dl|mg/d!|umol/l|umol/i|",
+    re.IGNORECASE
 )
 
-
-METADATA_START_RE = re.compile(
-    r"^(DRAWN|RECEIVED|REPORTED|PAGE|TEL|FAX|CIN|"
-    r"CLIENT CODE|CLIENT'S NAME|PATIENT NAME|PATIENT ID|"
-    r"ACCESSION NO|REFERRING CLIENT|DATE OF BIRTH)\b",
-    re.IGNORECASE,
+METADATA_RE = re.compile(
+    r"^(ORDER NO|HH NO|ADM NO|NAME|AGE|SEX|DATE|"
+    r"LOCATION|REFERRED BY|SAMP\. COLL|WORK SHT|"
+    r"MAIN LAB|DEPARTMENT|BIOCHEMISTRY|PHONE|"
+    r"CONSULTANT|REPORT PRINTED|PAGE)\b",
+    re.IGNORECASE
 )
 
+PAGE_RE = re.compile(
+    r"^[.\s]*PAGE\s+\d+\s+OF\s+\d+",
+    re.IGNORECASE
+)
+
+KNOWN_TEST_NAMES = [
+    "Total Protein",
+    "Albumin",
+    "Globulin (calculated)",
+    "A/G Ratio (calculated)",
+    "AIG Ratio (calculated)",
+    "Bilirubin(Total)",
+    "Bilirubin (Total)",
+    "Alkaline Phosphatase",
+    "SGOT",
+    "SGPT",
+]
+
+
+# ============================================================
+# 2. CONTROLLED OCR NORMALIZATION
+# ============================================================
+
+UNIT_CORRECTIONS = {
+    "gif": "g/L",
+    "g/di": "g/dL",
+    "g/dl": "g/dL",
+    "g/l": "g/L",
+    "mg/d!": "mg/dL",
+    "mg/dl": "mg/dL",
+    "umol/i": "µmol/L",
+    "umol/l": "µmol/L",
+    "µmol/l": "µmol/L",
+    "ua": "U/L",
+    "u/l": "U/L",
+    "ius": "IU/L",
+    "iu/l": "IU/L",
+    "iuu/l": "IU/L",
+    "1uu/": "IU/L",
+    "1uU/": "IU/L",
+    "%": "%",
+    "gil": "g/L",
+}
+
+
+def normalize_unit(raw_unit: str | None):
+    """Normalize only known OCR unit variations."""
+
+    if not raw_unit:
+        return None, False
+
+    key = raw_unit.strip().lower()
+
+    corrected = UNIT_CORRECTIONS.get(key)
+
+    if corrected is None:
+        return raw_unit, False
+
+    return corrected, corrected != raw_unit
+
+
+# ============================================================
+# 3. BASIC HELPERS
+# ============================================================
 
 def to_number(value: str) -> float:
     return float(value.replace(",", "").strip())
 
 
-def normalize_comparator(comparator: str) -> str:
-    comparator = comparator.lower().replace(" ", "")
+def normalize_test_name(name: str) -> str:
+    name = re.sub(r"\s+", " ", name).strip()
 
-    if comparator in ("<or=", "≤"):
-        return "<="
-    if comparator in (">or=", "≥"):
-        return ">="
+    replacements = {
+        "AIG Ratio (calculated)": "A/G Ratio (calculated)",
+        "AIG Ratio": "A/G Ratio",
+        "Bilirubin(Total)": "Bilirubin (Total)",
+    }
 
-    return comparator
+    return replacements.get(name, name)
 
 
-def parse_reference_range(text: str | None) -> dict[str, Any] | None:
-    if not text:
-        return None
+def find_test_name(left: str):
+    normalized = re.sub(r"\s+", " ", left).strip()
 
-    range_match = RANGE_RE.search(text)
-
-    if range_match:
-        try:
-            low = to_number(range_match.group("low"))
-            high = to_number(range_match.group("high"))
-        except ValueError:
-            return None
-
-        if low <= high:
-            return {
-                "type": "range",
-                "low": low,
-                "high": high,
-            }
-
-        return None
-
-    limit_match = LIMIT_RE.search(text)
-
-    if limit_match:
-        try:
-            value = to_number(limit_match.group("value"))
-        except ValueError:
-            return None
-
-        return {
-            "type": "limit",
-            "comparator": normalize_comparator(
-                limit_match.group("comparator")
-            ),
-            "value": value,
-        }
+    for name in sorted(KNOWN_TEST_NAMES, key=len, reverse=True):
+        if normalized.lower().startswith(name.lower()):
+            return name
 
     return None
 
 
-def check_reference_status(
-    value: float,
-    reference_range: dict[str, Any] | None,
-) -> str:
-    """Compare a value with its extracted reference interval."""
-
-    if not reference_range:
-        return "unknown"
-
-    if reference_range["type"] == "range":
-        if value < reference_range["low"]:
-            return "below"
-        if value > reference_range["high"]:
-            return "above"
-        return "within"
-
-    if reference_range["type"] == "limit":
-        comparator = reference_range["comparator"]
-        limit = reference_range["value"]
-
-        if comparator == "<":
-            return "above" if value >= limit else "within"
-        if comparator == "<=":
-            return "above" if value > limit else "within"
-        if comparator == ">":
-            return "below" if value <= limit else "within"
-        if comparator == ">=":
-            return "below" if value < limit else "within"
-
-    return "unknown"
-
-
-def is_suspicious_test_name(test_name: str) -> bool:
-    """Reject obvious short OCR fragments without rejecting common abbreviations."""
-
-    words = test_name.split()
-
-    if not words:
-        return True
-
-    # Reject fragments like "H e", but retain names like "WBC" or "TSH".
-    if len(words) > 1 and all(len(word) <= 2 for word in words):
-        return True
-
-    return False
-
-
-def parse_result_line(line: str) -> dict[str, Any] | None:
-    line = line.strip()
-
-    if not line:
-        return None
-
-    if METADATA_START_RE.search(line):
-        return None
-
-    match = re.match(
-        r"^(?P<test_name>[A-Za-z][A-Za-z0-9 /(),.%_-]*?)"
-        r"\s*:?\s+"
-        r"(?P<value>(?:<=|>=|<|>|≤|≥)?\s*"
-        r"-?\d[\d,]*(?:\.\d+)?)"
-        r"(?P<remainder>.*)$",
-        line,
-    )
+def extract_reference_range(text: str):
+    match = RANGE_RE.search(text)
 
     if not match:
         return None
 
-    test_name = match.group("test_name").strip(" :-\t")
-    raw_value = match.group("value").strip()
-    remainder = match.group("remainder").strip()
+    low = to_number(match.group("low"))
+    high = to_number(match.group("high"))
 
-    if len(test_name) < 3 or is_suspicious_test_name(test_name):
+    if low > high:
         return None
-
-    value_match = VALUE_RE.match(raw_value)
-
-    if not value_match:
-        return None
-
-    try:
-        value = to_number(value_match.group("number"))
-    except ValueError:
-        return None
-
-    comparator = value_match.group("comparator")
-
-    if comparator:
-        comparator = normalize_comparator(comparator)
-
-    flag_match = re.search(
-        r"\b(High|Low|Abnormal|Critical)\b",
-        remainder,
-        re.IGNORECASE,
-    )
-    flag = flag_match.group(1).lower() if flag_match else None
-
-    reference_range = parse_reference_range(remainder)
-
-    remainder_for_unit = RANGE_RE.sub("", remainder)
-    remainder_for_unit = LIMIT_RE.sub("", remainder_for_unit)
-    remainder_for_unit = re.sub(
-        r"\b(High|Low|Abnormal|Critical)\b",
-        "",
-        remainder_for_unit,
-        flags=re.IGNORECASE,
-    )
-
-    unit_match = UNIT_RE.search(remainder_for_unit)
-    unit = unit_match.group(0) if unit_match else None
-
-    reference_status = check_reference_status(
-        value,
-        reference_range,
-    )
 
     return {
-        "test_name": test_name,
-        "value": value,
-        "comparator": comparator,
-        "unit": unit,
-        "reference_range": reference_range,
-        "flag": flag,
-        "reference_status": reference_status,
-        "needs_review": True,
-        "original_line": line,
+        "type": "range",
+        "low": low,
+        "high": high,
     }
 
 
+def extract_unit(text: str):
+    match = UNIT_RE.search(text)
+
+    if not match:
+        return None
+
+    return match.group(0)
+
+
+def extract_flag(text: str):
+    """Find standalone flags without mistaking U/l for Low."""
+
+    cleaned = RANGE_RE.sub("", text)
+    cleaned = UNIT_RE.sub("", cleaned)
+
+    tokens = re.findall(
+        r"(?<![A-Za-z])(?:H|L|HIGH|LOW|ABNORMAL|CRITICAL)"
+        r"(?![A-Za-z])",
+        cleaned,
+        re.IGNORECASE
+    )
+
+    if not tokens:
+        return None
+
+    flag = tokens[0].lower()
+
+    if flag == "h":
+        return "high"
+
+    if flag == "l":
+        return "low"
+
+    return flag
+
+
+def check_reference_status(value, reference_range):
+    if not reference_range:
+        return "unknown"
+
+    if value < reference_range["low"]:
+        return "below"
+
+    if value > reference_range["high"]:
+        return "above"
+
+    return "within"
+
+
+# ============================================================
+# 4. PARSE ONE TABLE ROW
+# ============================================================
+
+def parse_table_row(line: str):
+
+    match = ROW_RE.match(line.strip())
+
+    if not match:
+        return None
+
+    left = match.group("left").strip()
+    raw_value = match.group("value")
+    right = match.group("right").strip()
+
+    raw_unit = extract_unit(right)
+    normalized_unit, unit_corrected = normalize_unit(raw_unit)
+
+    value = to_number(raw_value)
+
+    return {
+        "left": left,
+        "value": value,
+        "raw_ocr_value": raw_value,
+        "unit": normalized_unit,
+        "raw_ocr_unit": raw_unit,
+        "unit_correction_applied": unit_corrected,
+        "flag": extract_flag(right),
+        "reference_range": extract_reference_range(right),
+        "original_line": line.strip(),
+    }
+
+
+# ============================================================
+# 5. CREATE TEST ENTRY
+# ============================================================
+
+def create_test_entry(test_name: str, row: dict):
+
+    return {
+        "test_name": normalize_test_name(test_name),
+
+        "value": row["value"],
+        "raw_ocr_value": row["raw_ocr_value"],
+
+        "unit": row["unit"],
+        "raw_ocr_unit": row["raw_ocr_unit"],
+        "unit_correction_applied": row["unit_correction_applied"],
+
+        "reference_range": row["reference_range"],
+        "flag": row["flag"],
+
+        "reference_status": check_reference_status(
+            row["value"],
+            row["reference_range"]
+        ),
+
+        "alternate_values": [],
+
+        "needs_review": True,
+        "correction_applied": row["unit_correction_applied"],
+        "original_line": row["original_line"],
+    }
+
+
+# ============================================================
+# 6. PARSE REPORT
+# ============================================================
+
 def parse_report_text(text: str) -> dict[str, Any]:
+
     if not isinstance(text, str):
         raise TypeError("Report text must be a string.")
 
     if not text.strip():
         raise ValueError("Report text is empty.")
 
+    lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
     results = []
     unparsed_lines = []
-    unassigned_values = []
+    current_test = None
 
-    for line in text.splitlines():
-        line = line.strip()
+    def save_current():
+        nonlocal current_test
 
-        if not line:
+        if current_test is not None:
+            results.append(current_test)
+            current_test = None
+
+    for line in lines:
+
+        if METADATA_RE.search(line) or PAGE_RE.search(line):
             continue
 
-        # Preserve standalone numbers without guessing their test names.
-        standalone_match = re.fullmatch(
-            r"[-+]?\d[\d,]*(?:\.\d+)?",
-            line,
+        if re.fullmatch(r"[-_|. ]+", line):
+            continue
+
+        if line.lower() in {
+            "test result units status reference range",
+            "liver profile",
+            "serum",
+        }:
+            continue
+
+        row = parse_table_row(line)
+
+        if row is None:
+            unparsed_lines.append(line)
+            continue
+
+        left = row["left"]
+
+        # A recognized test name starts a new entry.
+        test_name = find_test_name(left)
+
+        if test_name:
+            save_current()
+            current_test = create_test_entry(test_name, row)
+            continue
+
+        # A Conventional row can introduce another test.
+        conventional_match = re.search(
+            r"\bConventional\b",
+            left,
+            re.IGNORECASE
         )
 
-        if standalone_match:
-            unassigned_values.append({
-                "value": to_number(line),
-                "original_line": line,
-                "needs_review": True,
-            })
+        if conventional_match:
+            save_current()
+
+            test_name = left[:conventional_match.start()].strip()
+
+            if len(test_name) >= 3:
+                current_test = create_test_entry(test_name, row)
+            else:
+                unparsed_lines.append(line)
+
             continue
 
-        result = parse_result_line(line)
+        # Other rows are attached as alternate values.
+        if current_test is not None:
 
-        if result is not None:
-            results.append(result)
-        else:
-            unparsed_lines.append(line)
+            current_test["alternate_values"].append({
+                "value": row["value"],
+                "raw_ocr_value": row["raw_ocr_value"],
+
+                "unit": row["unit"],
+                "raw_ocr_unit": row["raw_ocr_unit"],
+                "unit_correction_applied": row[
+                    "unit_correction_applied"
+                ],
+
+                "reference_range": row["reference_range"],
+                "flag": row["flag"],
+
+                "reference_status": check_reference_status(
+                    row["value"],
+                    row["reference_range"]
+                ),
+
+                "original_line": row["original_line"],
+                "needs_review": True,
+            })
+
+            if row["unit_correction_applied"]:
+                current_test["correction_applied"] = True
+
+            continue
+
+        unparsed_lines.append(line)
+
+    save_current()
 
     return {
         "results": results,
-        "unassigned_values": unassigned_values,
+        "unassigned_values": [],
         "unparsed_lines": unparsed_lines,
         "result_count": len(results),
-        "unassigned_value_count": len(unassigned_values),
-        "parser_version": "0.7",
+        "unassigned_value_count": 0,
+        "parser_version": "1.2",
         "disclaimer": (
-            "Extracted values are unverified candidates. Verify "
-            "test names, values, units, flags and reference ranges "
-            "against the original report. Reference comparisons "
-            "are not diagnoses. This parser does not provide "
-            "medical advice."
+            "Extracted values are unverified candidates. "
+            "Normalized units are controlled OCR corrections. "
+            "Verify all values, units and reference ranges against "
+            "the original report. This parser does not provide "
+            "medical advice or diagnoses."
         ),
     }
 
 
+# ============================================================
+# 7. PARSE TEXT FILE
+# ============================================================
+
 def parse_report_file(file_path: str) -> dict[str, Any]:
+
     path = Path(file_path)
 
     if not path.is_file():
@@ -292,4 +404,5 @@ def parse_report_file(file_path: str) -> dict[str, Any]:
         )
 
     text = path.read_text(encoding="utf-8")
+
     return parse_report_text(text)
