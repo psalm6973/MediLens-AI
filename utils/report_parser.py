@@ -5,7 +5,7 @@ import re
 
 
 # ============================================================
-# 1. PATTERNS
+# 1. NUMBER AND ROW PATTERNS
 # ============================================================
 
 NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
@@ -17,72 +17,108 @@ ROW_RE = re.compile(
 )
 
 RANGE_RE = re.compile(
-    rf"(?P<low>{NUMBER})\s*(?:-|–|—|to)\s*(?P<high>{NUMBER})",
-    re.IGNORECASE
+    rf"(?P<low>{NUMBER})\s*(?:-|–|—|to)\s*"
+    rf"(?P<high>{NUMBER})",
+    re.IGNORECASE,
 )
 
 UNIT_RE = re.compile(
-    r"g/dl|g/di|g/l|gif|mg/dl|mg/d!|umol/l|umol/i|"
-    r"µmol/l|u/l|ua|iu/l|ius|iuu/l|1uU/|%"
-    r"g/dl|g/di|g/l|gil|gif|mg/dl|mg/d!|umol/l|umol/i|",
-    re.IGNORECASE
+    r"(?<![A-Za-z])"
+    r"(?:"
+    r"millions?/cumm|"
+    r"lakhs?/cumm|"
+    r"cells?/cumm|"
+    r"cells?/µl|"
+    r"cells?/ul|"
+    r"million/µl|"
+    r"million/ul|"
+    r"lakhs?/µl|"
+    r"lakhs?/ul|"
+    r"g/dl|g/di|g/l|gm%|"
+    r"mg/dl|mg/di|"
+    r"mmol/l|mmol/di|"
+    r"umol/l|µmol/l|"
+    r"ng/ml|pg/ml|"
+    r"fl|fL|pg|"
+    r"iu/l|u/l|"
+    r"miu/l|"
+    r"mm/hr|mm/hour|"
+    r"seconds?|"
+    r"minutes?|"
+    r"%" 
+    r")"
+    r"(?![A-Za-z])",
+    re.IGNORECASE,
 )
 
+
+# ============================================================
+# 2. METADATA AND HEADER FILTERS
+# ============================================================
+
 METADATA_RE = re.compile(
-    r"^(ORDER NO|HH NO|ADM NO|NAME|AGE|SEX|DATE|"
-    r"LOCATION|REFERRED BY|SAMP\. COLL|WORK SHT|"
-    r"MAIN LAB|DEPARTMENT|BIOCHEMISTRY|PHONE|"
-    r"CONSULTANT|REPORT PRINTED|PAGE)\b",
-    re.IGNORECASE
+    r"^(?:"
+    r"ORDER NO|HH NO|ADM NO|NAME|PATIENT NAME|"
+    r"AGE|SEX|GENDER|DATE|LOCATION|REFERRED BY|"
+    r"SAMP\.? COLL|SAMPLE TYPE|WORK SHT|"
+    r"MAIN LAB|DEPARTMENT|PHONE|CONSULTANT|"
+    r"REPORT PRINTED|PRINT DATE|PAGE|SID|"
+    r"COLLECTED|REGISTERED|RECEIVED|APPROVED|"
+    r"BARCODE"
+    r")\b",
+    re.IGNORECASE,
+)
+
+HEADER_RE = re.compile(
+    r"^(?:"
+    r"TEST NAME|TEST|RESULT|RESULTS|UNITS?|"
+    r"REFERENCE RANGE|BIOLOGICAL REFERENCE|"
+    r"HAEMATOLOGY|HEMATOLOGY|"
+    r"BIOCHEMISTRY|"
+    r"CBC|COMPLETE BLOOD COUNT|"
+    r"LIVER FUNCTION TEST|LFT|"
+    r"KIDNEY FUNCTION TEST|KFT|RFT|"
+    r"LIPID PROFILE|"
+    r"DIFFERENTIAL COUNT|"
+    r"PERIPHERAL SMEAR EXAMINATION|"
+    r"URINE ROUTINE|"
+    r"URINALYSIS"
+    r")\b",
+    re.IGNORECASE,
 )
 
 PAGE_RE = re.compile(
-    r"^[.\s]*PAGE\s+\d+\s+OF\s+\d+",
-    re.IGNORECASE
+    r"^[.\s]*PAGE\s+\d+(?:\s+OF\s+\d+)?",
+    re.IGNORECASE,
 )
-
-KNOWN_TEST_NAMES = [
-    "Total Protein",
-    "Albumin",
-    "Globulin (calculated)",
-    "A/G Ratio (calculated)",
-    "AIG Ratio (calculated)",
-    "Bilirubin(Total)",
-    "Bilirubin (Total)",
-    "Alkaline Phosphatase",
-    "SGOT",
-    "SGPT",
-]
 
 
 # ============================================================
-# 2. CONTROLLED OCR NORMALIZATION
+# 3. CONTROLLED UNIT NORMALIZATION
 # ============================================================
 
 UNIT_CORRECTIONS = {
-    "gif": "g/L",
     "g/di": "g/dL",
     "g/dl": "g/dL",
     "g/l": "g/L",
-    "mg/d!": "mg/dL",
+    "gm%": "g/dL",
+    "mg/di": "mg/dL",
     "mg/dl": "mg/dL",
-    "umol/i": "µmol/L",
+    "mmol/l": "mmol/L",
     "umol/l": "µmol/L",
     "µmol/l": "µmol/L",
-    "ua": "U/L",
-    "u/l": "U/L",
-    "ius": "IU/L",
+    "ng/ml": "ng/mL",
+    "pg/ml": "pg/mL",
     "iu/l": "IU/L",
-    "iuu/l": "IU/L",
-    "1uu/": "IU/L",
-    "1uU/": "IU/L",
+    "u/l": "U/L",
+    "fl": "fL",
+    "pg": "pg",
     "%": "%",
-    "gil": "g/L",
 }
 
 
 def normalize_unit(raw_unit: str | None):
-    """Normalize only known OCR unit variations."""
+    """Normalize known unit variations without guessing unknown units."""
 
     if not raw_unit:
         return None, False
@@ -92,39 +128,17 @@ def normalize_unit(raw_unit: str | None):
     corrected = UNIT_CORRECTIONS.get(key)
 
     if corrected is None:
-        return raw_unit, False
+        return raw_unit.strip(), False
 
     return corrected, corrected != raw_unit
 
 
 # ============================================================
-# 3. BASIC HELPERS
+# 4. BASIC HELPERS
 # ============================================================
 
 def to_number(value: str) -> float:
     return float(value.replace(",", "").strip())
-
-
-def normalize_test_name(name: str) -> str:
-    name = re.sub(r"\s+", " ", name).strip()
-
-    replacements = {
-        "AIG Ratio (calculated)": "A/G Ratio (calculated)",
-        "AIG Ratio": "A/G Ratio",
-        "Bilirubin(Total)": "Bilirubin (Total)",
-    }
-
-    return replacements.get(name, name)
-
-
-def find_test_name(left: str):
-    normalized = re.sub(r"\s+", " ", left).strip()
-
-    for name in sorted(KNOWN_TEST_NAMES, key=len, reverse=True):
-        if normalized.lower().startswith(name.lower()):
-            return name
-
-    return None
 
 
 def extract_reference_range(text: str):
@@ -156,16 +170,17 @@ def extract_unit(text: str):
 
 
 def extract_flag(text: str):
-    """Find standalone flags without mistaking U/l for Low."""
+    """Find standalone abnormality flags."""
 
     cleaned = RANGE_RE.sub("", text)
     cleaned = UNIT_RE.sub("", cleaned)
 
     tokens = re.findall(
-        r"(?<![A-Za-z])(?:H|L|HIGH|LOW|ABNORMAL|CRITICAL)"
+        r"(?<![A-Za-z])"
+        r"(?:H|L|HIGH|LOW|ABNORMAL|CRITICAL)"
         r"(?![A-Za-z])",
         cleaned,
-        re.IGNORECASE
+        re.IGNORECASE,
     )
 
     if not tokens:
@@ -195,8 +210,35 @@ def check_reference_status(value, reference_range):
     return "within"
 
 
+def clean_test_name(name: str) -> str:
+    """Clean a candidate test label without inventing a test name."""
+
+    name = re.sub(r"\s+", " ", name).strip()
+    name = name.strip(" :;|.-")
+
+    return name
+
+
+def is_valid_test_label(name: str) -> bool:
+    """Reject empty labels and common report headings."""
+
+    if len(name) < 2:
+        return False
+
+    if METADATA_RE.search(name):
+        return False
+
+    if HEADER_RE.search(name):
+        return False
+
+    if re.fullmatch(r"[\d\s.,:/-]+", name):
+        return False
+
+    return True
+
+
 # ============================================================
-# 4. PARSE ONE TABLE ROW
+# 5. PARSE ONE TABLE ROW
 # ============================================================
 
 def parse_table_row(line: str):
@@ -206,11 +248,23 @@ def parse_table_row(line: str):
     if not match:
         return None
 
-    left = match.group("left").strip()
+    left = clean_test_name(match.group("left"))
     raw_value = match.group("value")
     right = match.group("right").strip()
 
+    if not is_valid_test_label(left):
+        return None
+
     raw_unit = extract_unit(right)
+
+    reference_range = extract_reference_range(right)
+    flag = extract_flag(right)
+
+    # A numeric value alone is not enough to identify a test result.
+    # Require a recognised unit, reference range, or explicit flag.
+    if not raw_unit and not reference_range and not flag:
+        return None
+
     normalized_unit, unit_corrected = normalize_unit(raw_unit)
 
     value = to_number(raw_value)
@@ -222,20 +276,20 @@ def parse_table_row(line: str):
         "unit": normalized_unit,
         "raw_ocr_unit": raw_unit,
         "unit_correction_applied": unit_corrected,
-        "flag": extract_flag(right),
-        "reference_range": extract_reference_range(right),
+        "flag": flag,
+        "reference_range": reference_range,
         "original_line": line.strip(),
     }
 
 
 # ============================================================
-# 5. CREATE TEST ENTRY
+# 6. CREATE TEST ENTRY
 # ============================================================
 
 def create_test_entry(test_name: str, row: dict):
 
     return {
-        "test_name": normalize_test_name(test_name),
+        "test_name": clean_test_name(test_name),
 
         "value": row["value"],
         "raw_ocr_value": row["raw_ocr_value"],
@@ -249,19 +303,22 @@ def create_test_entry(test_name: str, row: dict):
 
         "reference_status": check_reference_status(
             row["value"],
-            row["reference_range"]
+            row["reference_range"],
         ),
 
         "alternate_values": [],
 
+        # Every OCR candidate requires verification.
         "needs_review": True,
+
         "correction_applied": row["unit_correction_applied"],
+
         "original_line": row["original_line"],
     }
 
 
 # ============================================================
-# 6. PARSE REPORT
+# 7. PARSE REPORT
 # ============================================================
 
 def parse_report_text(text: str) -> dict[str, Any]:
@@ -280,28 +337,19 @@ def parse_report_text(text: str) -> dict[str, Any]:
 
     results = []
     unparsed_lines = []
-    current_test = None
-
-    def save_current():
-        nonlocal current_test
-
-        if current_test is not None:
-            results.append(current_test)
-            current_test = None
 
     for line in lines:
 
-        if METADATA_RE.search(line) or PAGE_RE.search(line):
+        if METADATA_RE.search(line):
+            continue
+
+        if PAGE_RE.search(line):
+            continue
+
+        if HEADER_RE.search(line):
             continue
 
         if re.fullmatch(r"[-_|. ]+", line):
-            continue
-
-        if line.lower() in {
-            "test result units status reference range",
-            "liver profile",
-            "serum",
-        }:
             continue
 
         row = parse_table_row(line)
@@ -310,88 +358,39 @@ def parse_report_text(text: str) -> dict[str, Any]:
             unparsed_lines.append(line)
             continue
 
-        left = row["left"]
+        # The label is taken from the report itself.
+        # No fixed list of test names is required.
+        test_name = row["left"]
 
-        # A recognized test name starts a new entry.
-        test_name = find_test_name(left)
-
-        if test_name:
-            save_current()
-            current_test = create_test_entry(test_name, row)
-            continue
-
-        # A Conventional row can introduce another test.
-        conventional_match = re.search(
-            r"\bConventional\b",
-            left,
-            re.IGNORECASE
+        results.append(
+            create_test_entry(test_name, row)
         )
-
-        if conventional_match:
-            save_current()
-
-            test_name = left[:conventional_match.start()].strip()
-
-            if len(test_name) >= 3:
-                current_test = create_test_entry(test_name, row)
-            else:
-                unparsed_lines.append(line)
-
-            continue
-
-        # Other rows are attached as alternate values.
-        if current_test is not None:
-
-            current_test["alternate_values"].append({
-                "value": row["value"],
-                "raw_ocr_value": row["raw_ocr_value"],
-
-                "unit": row["unit"],
-                "raw_ocr_unit": row["raw_ocr_unit"],
-                "unit_correction_applied": row[
-                    "unit_correction_applied"
-                ],
-
-                "reference_range": row["reference_range"],
-                "flag": row["flag"],
-
-                "reference_status": check_reference_status(
-                    row["value"],
-                    row["reference_range"]
-                ),
-
-                "original_line": row["original_line"],
-                "needs_review": True,
-            })
-
-            if row["unit_correction_applied"]:
-                current_test["correction_applied"] = True
-
-            continue
-
-        unparsed_lines.append(line)
-
-    save_current()
 
     return {
         "results": results,
+
         "unassigned_values": [],
+
         "unparsed_lines": unparsed_lines,
+
         "result_count": len(results),
+
         "unassigned_value_count": 0,
-        "parser_version": "1.2",
+
+        "parser_version": "2.0",
+
         "disclaimer": (
-            "Extracted values are unverified candidates. "
-            "Normalized units are controlled OCR corrections. "
-            "Verify all values, units and reference ranges against "
-            "the original report. This parser does not provide "
-            "medical advice or diagnoses."
+            "Extracted values are unverified OCR candidates. "
+            "All test names, values, units and reference ranges "
+            "must be checked against the original report. "
+            "This parser does not provide medical diagnoses "
+            "or treatment recommendations."
         ),
     }
 
 
 # ============================================================
-# 7. PARSE TEXT FILE
+# 8. PARSE TEXT FILE
 # ============================================================
 
 def parse_report_file(file_path: str) -> dict[str, Any]:

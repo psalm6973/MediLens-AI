@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f7f9fc">
+    <title>MediLens AI | Understand Your Health Reports</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+
+<body>
+    <header class="navbar">
+        <a href="/" class="brand">
+            <span class="brand-icon">M</span>
+            <span>MediLens<span class="brand-ai"> AI</span></span>
+        </a>
+
+        <nav>
+            <a href="#how-it-works">How it works</a>
+            <a href="#about">About</a>
+        </nav>
+
+        <a href="#upload-section" class="nav-button">Analyze a report</a>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="hero-content">
+                <div class="eyebrow">
+                    <span class="status-dot"></span>
+                    AI-powered report understanding
+                </div>
+
+                <h1>
+                    Your health report,<br>
+                    <span>made easier to understand.</span>
+                </h1>
+
+                <p class="hero-description">
+                    Medical reports can be complicated. MediLens AI helps you
+                    understand the information in your report through clear
+                    explanations and general health guidance.
+                </p>
+
+                <div class="hero-actions">
+                    <a href="#upload-section" class="primary-button">
+                        Analyze your report <span>→</span>
+                    </a>
+                    <a href="#how-it-works" class="secondary-button">
+                        See how it works
+                    </a>
+                </div>
+
+                <div class="trust-note">
+                    <span>✦</span>
+                    Designed to make medical information easier to understand
+                </div>
+            </div>
+
+            <div class="hero-visual">
+                <div class="visual-glow"></div>
+
+                <div class="report-card">
+                    <div class="report-top">
+                        <div class="report-symbol">✚</div>
+                        <div>
+                            <strong>Medical Report</strong>
+                            <span>Report overview</span>
+                        </div>
+                        <span class="report-tag">PDF</span>
+                    </div>
+
+                    <div class="report-divider"></div>
+
+                    <div class="report-heading">Understanding your results</div>
+                    <div class="skeleton-line long"></div>
+                    <div class="skeleton-line medium"></div>
+
+                    <div class="report-result">
+                        <div class="result-icon">✓</div>
+                        <div>
+                            <strong>Clear explanations</strong>
+                            <span>Understand reported findings</span>
+                        </div>
+                    </div>
+
+                    <div class="report-result">
+                        <div class="result-icon blue-icon">⌕</div>
+                        <div>
+                            <strong>General guidance</strong>
+                            <span>Learn what to discuss with a doctor</span>
+                        </div>
+                    </div>
+
+                    <div class="report-footer">
+                        <span>MEDILENS AI</span>
+                        <span>Report insights</span>
+                    </div>
+                </div>
+
+                <div class="floating-note">
+                    <span class="floating-check">✓</span>
+                    <div>
+                        <strong>Simple. Clear. Informative.</strong>
+                        <span>Medical information, explained.</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="upload-section" id="upload-section">
+            <div class="section-heading">
+                <span class="section-label">GET STARTED</span>
+                <h2>Let's understand your report.</h2>
+                <p>Upload a medical report to begin your analysis.</p>
+            </div>
+
+            <form id="upload-form" class="upload-card">
+                <input
+                    type="file"
+                    id="report-file"
+                    name="file"
+                    accept=".pdf,.png,.jpg,.jpeg"
+                    hidden
+                >
+
+                <label for="report-file" class="drop-zone" id="drop-zone">
+                    <div class="upload-icon">↑</div>
+                    <h3>Choose your medical report</h3>
+                    <p>Drag and drop your file here, or <span>browse files</span></p>
+                    <small>Supported formats: PDF, PNG, JPG, JPEG</small>
+                </label>
+
+                <div class="selected-file" id="selected-file" hidden>
+                    <div class="file-icon">▤</div>
+                    <div class="file-details">
+                        <strong id="file-name">report.pdf</strong>
+                        <span id="file-size">0 KB</span>
+                    </div>
+                    <button type="button" id="remove-file" class="remove-file"
+                            aria-label="Remove selected file">×</button>
+                </div>
+
+                <p class="upload-error" id="upload-error" role="alert"></p>
+
+                <button type="submit" class="primary-button upload-button" id="analyze-button">
+                    Analyze report <span>→</span>
+                </button>
+
+                <p class="privacy-note">
+                    Your report may contain sensitive information. Only upload
+                    documents you are authorized to share.
+                </p>
+            </form>
+        </section>
+
+        <section class="how-section" id="how-it-works">
+            <div class="section-heading">
+                <span class="section-label">THE PROCESS</span>
+                <h2>Three steps. A clearer picture.</h2>
+                <p>A simple process to help you understand your report.</p>
+            </div>
+
+            <div class="steps-grid">
+                <article class="step-card">
+                    <div class="step-number">01</div>
+                    <div class="step-icon">↥</div>
+                    <h3>Upload your report</h3>
+                    <p>Upload a supported medical report in PDF or image format.</p>
+                </article>
+
+                <article class="step-card">
+                    <div class="step-number">02</div>
+                    <div class="step-icon">⌕</div>
+                    <h3>AI analysis</h3>
+                    <p>The system extracts report information and prepares an explanation.</p>
+                </article>
+
+                <article class="step-card">
+                    <div class="step-number">03</div>
+                    <div class="step-icon">✧</div>
+                    <h3>Understand the findings</h3>
+                    <p>Review the summary, findings and general guidance.</p>
+                </article>
+            </div>
+        </section>
+
+        <section class="disclaimer" id="about">
+            <div class="disclaimer-icon">i</div>
+            <div>
+                <strong>An important note about your health</strong>
+                <p>
+                    MediLens AI is an educational information tool. It does not
+                    diagnose conditions or replace professional medical advice.
+                    Please consult a qualified healthcare professional about
+                    your report and health concerns.
+                </p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <a href="/" class="brand footer-brand">
+            <span class="brand-icon">M</span>
+            <span>MediLens<span class="brand-ai"> AI</span></span>
+        </a>
+        <span>Making medical information easier to understand.</span>
+        <span>© 2026 MediLens AI</span>
+    </footer>
+
+    <script src="{{ url_for('static', path='script.js') }}"></script>
+</body>
+</html>
