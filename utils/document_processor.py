@@ -5,14 +5,16 @@ import pymupdf
 import pytesseract
 from PIL import Image, ImageOps
 
-from utils.ocr_selector import select_psm
 
+# ============================================================
+# 1. CONFIGURATION
+# ============================================================
 
-# Tesseract installation on Windows.
-pytesseract.pytesseract.tesseract_cmd = (
+TESSERACT_PATH = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
 
+pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
 SUPPORTED_IMAGE_TYPES = {
     ".png",
@@ -24,120 +26,264 @@ SUPPORTED_IMAGE_TYPES = {
 }
 
 
-def run_ocr(image: Image.Image) -> str:
-    """Run OCR on an image using the selected page segmentation mode."""
+# ============================================================
+# 2. OCR CANDIDATE
+# ============================================================
 
-    
-    image = ImageOps.autocontrast(image)
+def _ocr_candidate(image, psm):
+    """Run OCR once and return text and confidence information."""
 
-    # Enlarge the image to improve OCR readability.
-    image = image.resize(
-    (image.width * 3, image.height * 3),
-    Image.Resampling.LANCZOS,
-   )
+    from pytesseract import Output
 
-    psm, reason = select_psm(image)
-    print(f"Selected PSM: {psm} ({reason})")
-    print("IMAGE SIZE:", image.size)
-    print("SELECTED PSM:", psm)
+    config = f"--oem 3 --psm {psm}"
+
+    data = pytesseract.image_to_data(
+        image,
+        config=config,
+        output_type=Output.DICT
+    )
+
+    confidences = []
+
+    for word, confidence in zip(data["text"], data["conf"]):
+        word = word.strip()
+
+        if not word:
+            continue
+
+        try:
+            confidence = float(confidence)
+
+            if confidence >= 0:
+                confidences.append(confidence)
+
+        except (TypeError, ValueError):
+            pass
 
     text = pytesseract.image_to_string(
         image,
-        lang="eng",
-        config=f"--oem 3 --psm {psm}",
+        config=config
+    ).strip()
+
+    average_confidence = (
+        sum(confidences) / len(confidences)
+        if confidences else 0
     )
 
-    return text.strip()
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    # Small preference for OCR output that preserves rows.
+    row_score = min(len(lines), 15) * 1.5
+
+    score = average_confidence + row_score
+
+    return {
+        "psm": psm,
+        "text": text,
+        "confidence": average_confidence,
+        "score": score,
+        "line_count": len(lines),
+    }
 
 
-def extract_text_from_pdf(file_path: str) -> str:
-    """Extract selectable text or OCR scanned PDF pages."""
+# ============================================================
+# 3. OCR PROCESSING
+# ============================================================
 
-    path = Path(file_path)
+def run_ocr(image):
+    """
+    Compare multiple OCR layouts and select a readable result.
 
-    if not path.is_file() or path.suffix.lower() != ".pdf":
-        raise ValueError("Please provide a valid PDF file.")
+    No numeric OCR values are automatically corrected.
+    """
+
+    image = ImageOps.autocontrast(
+        image.convert("L")
+    )
+
+    width, height = image.size
+
+    image = image.resize(
+        (width * 3, height * 3),
+        Image.Resampling.LANCZOS
+    )
+
+    candidates = []
+
+    for psm in (3, 6, 11):
+
+        try:
+            candidate = _ocr_candidate(image, psm)
+            candidates.append(candidate)
+
+            print(
+                f"OCR PSM {psm}: "
+                f"confidence={candidate['confidence']:.1f}, "
+                f"lines={candidate['line_count']}",
+                flush=True
+            )
+
+        except Exception as error:
+
+            print(
+                f"OCR PSM {psm} failed: {error}",
+                flush=True
+            )
+
+    if not candidates:
+        raise RuntimeError(
+            "All OCR layout attempts failed."
+        )
+
+    best = max(
+        candidates,
+        key=lambda item: item["score"]
+    )
+
+    print(
+        f"Selected OCR PSM: {best['psm']}",
+        flush=True
+    )
+
+    return best["text"]
+
+
+# ============================================================
+# 4. PDF TEXT EXTRACTION
+# ============================================================
+
+def extract_pdf_text(file_path):
+    """
+    Extract selectable PDF text first.
+
+    If a page has no selectable text, use OCR on that page.
+    """
+
+    document = pymupdf.open(file_path)
 
     extracted_pages = []
 
-    with pymupdf.open(path) as document:
-        for page in document:
+    try:
 
-            text = page.get_text().strip()
+        for page_number, page in enumerate(document):
 
-            if not text:
+            page_text = page.get_text("text").strip()
+
+            if page_text:
+                extracted_pages.append(page_text)
+
+                print(
+                    f"Page {page_number + 1}: "
+                    "Selectable text extracted.",
+                    flush=True
+                )
+
+            else:
+                print(
+                    f"Page {page_number + 1}: "
+                    "No selectable text. Running OCR.",
+                    flush=True
+                )
+
                 pixmap = page.get_pixmap(
                     matrix=pymupdf.Matrix(2, 2),
-                    alpha=False,
+                    alpha=False
                 )
 
                 image = Image.frombytes(
                     "RGB",
                     [pixmap.width, pixmap.height],
-                    pixmap.samples,
+                    pixmap.samples
                 )
 
-                psm, reason = select_psm(image)
-                print(
-                    f"PDF Page {page.number + 1}: "
-                    f"PSM {psm} ({reason})"
-                )
+                page_text = run_ocr(image)
 
-                text = pytesseract.image_to_string(
-                    ImageOps.grayscale(image),
-                    lang="eng",
-                    config=f"--oem 3 --psm {psm}",
-                ).strip()
+                if page_text:
+                    extracted_pages.append(page_text)
 
-            if text:
-                extracted_pages.append(
-                    f"Page {page.number + 1}\n{text}"
-                )
+    finally:
+        document.close()
 
-    return "\n\n".join(extracted_pages)
+    return "\n\n".join(extracted_pages).strip()
 
 
-def extract_text_from_image(file_path: str) -> str:
-    """Extract text from a medical report image."""
+# ============================================================
+# 5. IMAGE EXTRACTION
+# ============================================================
 
-    path = Path(file_path)
+def extract_image_text(file_path):
+    """Extract text from a supported image file."""
 
-    if not path.is_file():
-        raise FileNotFoundError("The image file was not found.")
+    image = Image.open(file_path)
 
-    if path.suffix.lower() not in SUPPORTED_IMAGE_TYPES:
-        raise ValueError("Unsupported image format.")
-
-    with Image.open(path) as original_image:
-
-        image = ImageOps.exif_transpose(original_image)
-        image = image.convert("RGB")
-
+    try:
+        image = ImageOps.exif_transpose(image)
         text = run_ocr(image)
 
-    return text
+    finally:
+        image.close()
+
+    return text.strip()
 
 
-def extract_document_text(file_path: str) -> str:
-    """Extract text from a supported medical document."""
+# ============================================================
+# 6. MAIN DOCUMENT PROCESSOR
+# ============================================================
+
+def extract_document_text(file_path):
+    """
+    Extract text from a PDF or supported image.
+
+    Returns the original extracted text for the report parser.
+    """
 
     path = Path(file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Document not found: {path}"
+        )
+
+    if not path.is_file():
+        raise ValueError(
+            "The supplied path is not a file."
+        )
+
     extension = path.suffix.lower()
 
+    print(
+        f"\nProcessing document: {path.name}",
+        flush=True
+    )
+
     if extension == ".pdf":
-        text = extract_text_from_pdf(str(path))
+
+        extracted_text = extract_pdf_text(path)
 
     elif extension in SUPPORTED_IMAGE_TYPES:
-        text = extract_text_from_image(str(path))
+
+        extracted_text = extract_image_text(path)
 
     else:
+
         raise ValueError(
-            "Supported files: PDF, PNG, JPG, JPEG, TIF, TIFF, BMP."
+            f"Unsupported file format: {extension}"
         )
 
-    if not text.strip():
+    if not extracted_text.strip():
+
         raise ValueError(
-            "No readable text was found. Try a clearer scan or image."
+            "No readable text could be extracted from the document."
         )
 
-    return text
+    print(
+        f"Document extraction completed. "
+        f"Characters extracted: {len(extracted_text)}",
+        flush=True
+    )
+
+    return extracted_text

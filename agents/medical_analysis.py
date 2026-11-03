@@ -3,8 +3,7 @@ import json
 import os
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from groq import Groq
 
 from utils.rag_helper import retrieve_documents
 from utils.mock_analysis import mock_medical_analysis_agent
@@ -14,23 +13,20 @@ load_dotenv()
 
 
 # ============================================================
-# 1. GEMINI CLIENT
+# 1. GROQ CLIENT
 # ============================================================
 
-def get_gemini_client():
-    """Create a Gemini client using the API key in .env."""
+def get_groq_client():
+    """Create a Groq client using the API key in .env."""
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
         raise ValueError(
-            "GEMINI_API_KEY was not found. Check your .env file."
+            "GROQ_API_KEY was not found. Check your .env file."
         )
 
-    return genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(timeout=180000)
-    )
+    return Groq(api_key=api_key)
 
 
 # ============================================================
@@ -96,7 +92,6 @@ def build_medical_context(results: list[dict]) -> str:
 
             "test_name": test_name,
 
-            # Primary measurement
             "primary_result": {
                 "value": item.get("value"),
                 "raw_ocr_value": item.get("raw_ocr_value"),
@@ -112,17 +107,14 @@ def build_medical_context(results: list[dict]) -> str:
                 "flag": item.get("flag")
             },
 
-            # Alternate measurements
             "alternate_results": alternate_values,
 
-            # Verification information
             "needs_review": item.get("needs_review", True),
             "correction_applied": item.get(
                 "correction_applied", False
             ),
             "original_line": item.get("original_line", ""),
 
-            # RAG references
             "retrieved_references": references
         })
 
@@ -171,6 +163,12 @@ def validate_medical_analysis(analysis: dict) -> dict:
     if not isinstance(analysis["general_guidance"], list):
         raise ValueError("General guidance must be a list.")
 
+    if not all(
+        isinstance(item, str)
+        for item in analysis["general_guidance"]
+    ):
+        raise ValueError("General guidance items must be strings.")
+
     if not isinstance(analysis["gp_guidance"], str):
         raise ValueError("GP guidance must be a string.")
 
@@ -189,6 +187,11 @@ def validate_medical_analysis(analysis: dict) -> dict:
             if field not in analysis["advanced_care"]:
                 raise ValueError(
                     f"Advanced care is missing the '{field}' field."
+                )
+
+            if not isinstance(analysis["advanced_care"][field], str):
+                raise ValueError(
+                    f"Advanced care '{field}' must be a string."
                 )
 
     for finding in analysis["findings"]:
@@ -229,7 +232,7 @@ def use_mock_fallback(
     reason: str
 ) -> dict:
     """
-    Activate deterministic fallback when Gemini analysis
+    Activate deterministic fallback when Groq analysis
     is unavailable or its response cannot be validated.
     """
 
@@ -255,8 +258,8 @@ def medical_analysis_agent(parsed_report: dict) -> dict:
 
         1. Receive parsed report.
         2. Retrieve medical knowledge using RAG.
-        3. Send complete report context to Gemini.
-        4. Validate Gemini response.
+        3. Send report context to Groq GPT-OSS-120B.
+        4. Validate the model response.
         5. Activate mock fallback if anything fails.
     """
 
@@ -280,7 +283,7 @@ def medical_analysis_agent(parsed_report: dict) -> dict:
         )
 
     # --------------------------------------------------------
-    # GEMINI ANALYSIS
+    # GROQ ANALYSIS
     # --------------------------------------------------------
 
     try:
@@ -290,7 +293,8 @@ def medical_analysis_agent(parsed_report: dict) -> dict:
         prompt = f"""
 You are the medical report explanation component of MediLens-AI.
 
-Explain extracted medical report information in simple language.
+Your job is to explain extracted medical report information
+in simple, understandable language.
 
 IMPORTANT RULES:
 
@@ -301,8 +305,8 @@ IMPORTANT RULES:
 
 3. Treat every extracted result as an unverified OCR candidate.
 
-4. Preserve the primary extracted value, raw OCR value,
-   normalized unit and original OCR unit.
+4. Preserve primary values, raw OCR values, normalized units
+   and original OCR units.
 
 5. Preserve alternate measurements. Never silently discard,
    combine, average or replace an alternate value.
@@ -318,10 +322,10 @@ IMPORTANT RULES:
 9. If needs_review is true, clearly mention that the value
    requires verification against the original report.
 
-10. Do not assume a value is abnormal based only on a
-    general reference document.
+10. Prefer the reference range printed in the report.
 
-11. Prefer the reference range printed in the report.
+11. Do not assume a value is abnormal based only on a
+    general reference document.
 
 12. Use retrieved references only when relevant.
     Do not invent facts or citations.
@@ -330,9 +334,9 @@ IMPORTANT RULES:
 
 14. Recommend general physician review when appropriate.
 
-15. Add an Advanced Care department only when report evidence
-    strongly supports further evaluation. Do not recommend
-    individual doctors.
+15. Add an Advanced Care department only when the available
+    report evidence strongly supports further evaluation.
+    Never recommend individual doctors.
 
 16. Do not provide treatment instructions or medication doses.
 
@@ -342,11 +346,16 @@ IMPORTANT RULES:
 18. If OCR verification is required, do not present the
     finding as a confirmed abnormality.
 
+19. Do not infer a patient's age, sex, medical history or
+    other missing information.
+
+20. Explain uncertainty rather than guessing.
+
 EXTRACTED REPORT INFORMATION AND RETRIEVED REFERENCES:
 
 {medical_context}
 
-Return ONLY valid JSON using this structure:
+Return ONLY valid JSON using this exact structure:
 
 {{
     "status": "success",
@@ -381,8 +390,8 @@ Do not invent missing values or reference ranges.
 """
 
         # Debug information
-        print("\n--- GEMINI REQUEST DEBUG ---", flush=True)
-        print("Model: gemini-3.8-flash", flush=True)
+        print("\n--- GROQ REQUEST DEBUG ---", flush=True)
+        print("Model: openai/gpt-oss-120b", flush=True)
         print("Prompt length:", len(prompt), flush=True)
         print("Report results:", len(results), flush=True)
         print(
@@ -390,34 +399,46 @@ Do not invent missing values or reference ranges.
             len(medical_context),
             flush=True
         )
-        print("---------------------------\n", flush=True)
+        print("--------------------------\n", flush=True)
 
-        client = get_gemini_client()
+        client = get_groq_client()
 
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config={
-                "response_mime_type": "application/json"
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.3,
+            max_tokens=3000,
+            response_format={
+                "type": "json_object"
             }
         )
 
-        if not response.text:
-            raise ValueError("Gemini returned an empty response.")
+        if not response.choices:
+            raise ValueError("Groq returned no response choices.")
 
-        analysis = json.loads(response.text)
+        response_text = response.choices[0].message.content
+
+        if not response_text:
+            raise ValueError("Groq returned an empty response.")
+
+        analysis = json.loads(response_text)
 
         if not isinstance(analysis, dict):
             raise ValueError(
-                "Gemini returned an unexpected response format."
+                "Groq returned an unexpected response format."
             )
 
         analysis = validate_medical_analysis(analysis)
 
-        analysis["analysis_mode"] = "gemini"
+        analysis["analysis_mode"] = "groq"
 
         print(
-            "Gemini analysis completed and passed validation.",
+            "Groq analysis completed and passed validation.",
             flush=True
         )
 
