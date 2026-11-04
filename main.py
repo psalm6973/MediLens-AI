@@ -55,6 +55,7 @@ def run_medilens(file_path: str) -> dict:
         return {
             "status": "error",
             "stage": "document_reader",
+            "extraction_status": "failed",
             "message": "The uploaded report could not be found.",
         }
 
@@ -69,17 +70,46 @@ def run_medilens(file_path: str) -> dict:
         if document_result.get("status") != "success":
             return {
                 "status": "needs_review",
-                "stage": "document_reader",
-                "message": "The report could not be processed successfully.",
+                "stage": "completed",
+                "extraction_status": "failed",
+                "analysis_status": "not_started",
+                "safety_status": "not_started",
+                "message": (
+                    "The report could not be processed successfully. "
+                    "Manual review is required."
+                ),
                 "details": document_result,
             }
 
-        parsed_report = document_result.get("parsed_report", {})
+        parsed_report = document_result.get("parsed_report")
 
         if not isinstance(parsed_report, dict):
             raise ValueError(
                 "The parsed report has an invalid format."
             )
+
+        document_metadata = {
+            "extraction_method": document_result.get(
+                "extraction_method"
+            ),
+            "extraction_warnings": document_result.get(
+                "extraction_warnings", []
+            ),
+            "review_required": document_result.get(
+                "review_required", True
+            ),
+            "quality_status": document_result.get(
+                "quality_status"
+            ),
+            "fallback_attempted": document_result.get(
+                "fallback_attempted", False
+            ),
+            "candidate_result_count": document_result.get(
+                "candidate_result_count", 0
+            ),
+        }
+
+        extraction_status = "success"
 
     except Exception as error:
         print("\n--- DOCUMENT READER ERROR ---")
@@ -89,6 +119,7 @@ def run_medilens(file_path: str) -> dict:
         return {
             "status": "error",
             "stage": "document_reader",
+            "extraction_status": "failed",
             "message": "An error occurred while reading the report.",
             "details": str(error),
         }
@@ -98,7 +129,10 @@ def run_medilens(file_path: str) -> dict:
     # --------------------------------------------------
 
     try:
-        medical_analysis = medical_analysis_agent(parsed_report)
+        medical_analysis = medical_analysis_agent(
+            parsed_report,
+            document_metadata
+        )
 
         if not isinstance(medical_analysis, dict):
             raise ValueError(
@@ -120,9 +154,17 @@ def run_medilens(file_path: str) -> dict:
 
         return {
             "status": "needs_review",
-            "stage": "medical_analysis",
-            "message": "Medical analysis failed or did not pass validation.",
+            "stage": "completed",
+            "extraction_status": extraction_status,
+            "analysis_status": "failed",
+            "safety_status": "not_started",
+            "message": (
+                "Report extraction completed, but medical analysis "
+                "failed or did not pass validation."
+            ),
             "details": str(error),
+            "parsed_report": parsed_report,
+            "document_metadata": document_metadata,
         }
 
     # --------------------------------------------------
@@ -137,6 +179,11 @@ def run_medilens(file_path: str) -> dict:
                 "Safety check must return a dictionary."
             )
 
+        if not isinstance(safety_result.get("analysis"), dict):
+            raise ValueError(
+                "Safety Care did not return a valid analysis."
+            )
+
     except Exception as error:
         print("\n--- SAFETY CARE ERROR ---")
         traceback.print_exc()
@@ -144,9 +191,21 @@ def run_medilens(file_path: str) -> dict:
 
         return {
             "status": "needs_review",
-            "stage": "safety_care",
-            "message": "The safety check could not be completed.",
+            "stage": "completed",
+            "extraction_status": extraction_status,
+            "analysis_status": (
+                "needs_review"
+                if analysis_needs_review
+                else "success"
+            ),
+            "safety_status": "failed",
+            "message": (
+                "Report extraction and medical analysis completed, "
+                "but the safety check could not be completed."
+            ),
             "details": str(error),
+            "parsed_report": parsed_report,
+            "document_metadata": document_metadata,
             "analysis": medical_analysis,
         }
 
@@ -161,48 +220,91 @@ def run_medilens(file_path: str) -> dict:
         "message": safety_result.get("message"),
     }
 
-    final_analysis = safety_result.get(
-        "analysis",
-        medical_analysis
+    final_analysis = safety_result["analysis"]
+
+    # --------------------------------------------------
+    # FINAL STATUS CALCULATION
+    # --------------------------------------------------
+
+    extraction_needs_review = document_metadata.get(
+        "review_required", True
     )
 
-    # --------------------------------------------------
-    # FINAL WORKFLOW RESULT
-    # --------------------------------------------------
+    # Recheck analysis status after Safety Care.
+    analysis_needs_review = (
+        final_analysis.get("status") != "success"
+    )
 
-    if safety_check["review_required"]:
-        return {
-            "status": "needs_review",
-            "stage": "safety_care",
-            "message": safety_check["message"],
-            "parsed_report": parsed_report,
-            "analysis": final_analysis,
-            "safety_flags": safety_check["safety_flags"],
-            "safety_check": safety_check,
-        }
+    safety_needs_review = (
+        safety_check["review_required"]
+        or safety_check["status"] != "passed_checks"
+    )
+
+    final_needs_review = (
+        extraction_needs_review
+        or analysis_needs_review
+        or safety_needs_review
+    )
 
     if analysis_needs_review:
+        analysis_status = "needs_review"
+    else:
+        analysis_status = "success"
+
+    if safety_needs_review:
+        safety_status = "needs_review"
+    else:
+        safety_status = "passed_checks"
+
+    common_result = {
+        "stage": "completed",
+        "extraction_status": extraction_status,
+        "analysis_status": analysis_status,
+        "safety_status": safety_status,
+        "parsed_report": parsed_report,
+        "document_metadata": document_metadata,
+        "analysis": final_analysis,
+        "safety_flags": safety_check["safety_flags"],
+        "safety_check": safety_check,
+    }
+
+    if final_needs_review:
+
+        review_reasons = []
+
+        if extraction_needs_review:
+            review_reasons.append(
+                "Extracted report information requires "
+                "verification against the original report."
+            )
+
+        if analysis_needs_review:
+            review_reasons.append(
+                "Medical analysis requires further review."
+            )
+
+        if safety_needs_review:
+            review_reasons.append(
+                "Safety checks identified concerns or "
+                "could not be completed successfully."
+            )
+
         return {
             "status": "needs_review",
-            "stage": "medical_analysis",
-            "message": (
-                "Medical analysis requires further review. "
-                "Safety checks completed."
-            ),
-            "parsed_report": parsed_report,
-            "analysis": final_analysis,
-            "safety_flags": safety_check["safety_flags"],
-            "safety_check": safety_check,
+            "message": " ".join(review_reasons),
+            "review_reasons": review_reasons,
+            **common_result,
         }
 
     return {
         "status": "success",
         "message": (
-            "The report passed the basic processing and safety checks."
+            "Report processing and safety checks completed. "
+            "Extracted values and medical interpretations must "
+            "still be verified by an appropriate healthcare professional."
         ),
-        "parsed_report": parsed_report,
-        "analysis": final_analysis,
-        "safety_check": safety_check,
+        "review_reasons": [],
+        **common_result,
     }
 
 
@@ -267,7 +369,9 @@ async def analyze_report(file: UploadFile = File(...)):
     if extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported file format. Upload a PDF, PNG or JPG.",
+            detail=(
+                "Unsupported file format. Upload a PDF, PNG or JPG."
+            ),
         )
 
     content = await file.read()
@@ -310,7 +414,10 @@ async def analyze_report(file: UploadFile = File(...)):
 
         raise HTTPException(
             status_code=500,
-            detail="An unexpected error occurred while processing the report.",
+            detail=(
+                "An unexpected error occurred while processing "
+                "the report."
+            ),
         ) from error
 
     finally:

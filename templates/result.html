@@ -4,172 +4,257 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MediLens AI | Report Results</title>
-
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-
+    <title>Your Report | MediLens AI</title>
     <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 
-<body>
-    <header class="navbar">
-        <a href="/" class="brand">
-            <span class="brand-icon">M</span>
-            <span>MediLens<span class="brand-ai"> AI</span></span>
-        </a>
+<body class="report-page">
 
-        <a href="/" class="nav-button">← New report</a>
-    </header>
+{% set analysis = result.get('analysis', {}) %}
+{% set safety = result.get('safety', {}) %}
+{% set findings = analysis.get('findings', result.get('findings', [])) %}
+{% set advanced = analysis.get('advanced_care', result.get('advanced_care')) %}
+{% set guidance = analysis.get('general_guidance', analysis.get('guidance', [])) %}
+{% set needs_review = result.get('review_required', False) or result.get('extraction_review_required', False) or analysis.get('review_required', False) or analysis.get('status') == 'needs_review' %}
 
-    <main class="results-main">
-        <section class="results-heading">
-            <span class="section-label">YOUR REPORT</span>
-            <h1>Report analysis</h1>
-            <p>Here is an explanation of the information extracted from your report.</p>
-        </section>
+<nav class="report-navbar">
+    <a href="/" class="brand">
+        <span class="brand-icon">✦</span>
+        <span>MediLens <span class="brand-ai">AI</span></span>
+    </a>
+    <a href="/" class="report-home-link">Home</a>
+</nav>
 
-        {% set analysis = result.get("analysis", {}) %}
-        {% set status = result.get("status", "error") %}
+<main class="report-container">
 
-        <section class="status-card">
-            {% if status == "success" %}
-                <span class="status-indicator success-indicator">✓</span>
-                <div>
-                    <strong>Analysis completed</strong>
-                    <p>{{ result.get("message", "The analysis workflow completed.") }}</p>
-                </div>
-            {% elif status == "needs_review" %}
-                <span class="status-indicator review-indicator">!</span>
-                <div>
-                    <strong>Further review required</strong>
-                    <p>{{ result.get("message", "This report requires further review.") }}</p>
-                </div>
-            {% else %}
-                <span class="status-indicator review-indicator">!</span>
-                <div>
-                    <strong>Analysis could not be completed</strong>
-                    <p>{{ result.get("message", "An error occurred while processing the report.") }}</p>
-                </div>
-            {% endif %}
-        </section>
+    <section class="report-intro">
+        <p class="report-eyebrow">YOUR PERSONAL REPORT OVERVIEW</p>
+        <h1>Your report,<br>explained.</h1>
+        <p>Understand your medical report through simple explanations, important observations and helpful guidance.</p>
+    </section>
 
-        {% if analysis %}
-            <section class="result-card">
-                <span class="section-label">OVERVIEW</span>
-                <h2>Report summary</h2>
-                <p class="result-paragraph">
-                    {{ analysis.get("summary", "No summary was provided.") }}
-                </p>
-            </section>
-
-            <section class="result-card">
-                <span class="section-label">OBSERVATIONS</span>
-                <h2>Reported findings</h2>
-
-                {% set findings = analysis.get("findings", []) %}
-
-                {% if findings %}
-                    <div class="findings-list">
-                        {% for finding in findings %}
-                            <div class="finding-row">
-                                <div>
-                                    <strong>
-                                        {{ finding.get("test_name", "Unnamed test") }}
-                                    </strong>
-                                    {% if finding.get("reference_range") %}
-                                        <p>Reference range: {{ finding.get("reference_range") }}</p>
-                                    {% endif %}
-                                </div>
-
-                                <span class="finding-value">
-                                    {{ finding.get("reported_value", "Not available") }}
-                                </span>
-                            </div>
-                        {% endfor %}
-                    </div>
+    <section class="report-status-panel">
+        <div class="report-status-icon">✓</div>
+        <div>
+            <h2>
+                {% if needs_review %}
+                    Your report needs a little review
                 {% else %}
-                    <p class="result-paragraph">No findings are available.</p>
+                    Your report analysis is ready
                 {% endif %}
-            </section>
-
-            <section class="result-card">
-                <span class="section-label">GENERAL INFORMATION</span>
-                <h2>General guidance</h2>
-
-                {% set guidance = analysis.get("general_guidance", []) %}
-
-                {% if guidance %}
-                    <ul class="guidance-list">
-                        {% for item in guidance %}
-                            <li>{{ item }}</li>
-                        {% endfor %}
-                    </ul>
+            </h2>
+            <p>
+                {% if needs_review %}
+                    Some extracted information may need confirmation. Compare the findings with your original report.
                 {% else %}
-                    <p class="result-paragraph">No general guidance was provided.</p>
+                    Your report has been processed. Review the explanations below and discuss any concerns with a qualified healthcare professional.
                 {% endif %}
-            </section>
-
-            {% if analysis.get("advanced_care") %}
-                <section class="result-card advanced-care-card">
-                    <span class="section-label">ADVANCED CARE</span>
-                    <h2>Department information</h2>
-                    <p class="result-paragraph">
-                        {{ analysis.get("advanced_care") }}
-                    </p>
-                </section>
-            {% endif %}
-        {% endif %}
-
-        {% if result.get("safety_check") %}
-            <section class="result-card safety-card">
-                <span class="section-label">SAFETY REVIEW</span>
-                <h2>Safety information</h2>
-
-                <p class="result-paragraph">
-                    {{ result["safety_check"].get("message", "Safety check information is available.") }}
-                </p>
-
-                {% if result.get("safety_flags") %}
-                    <ul class="guidance-list">
-                        {% for flag in result["safety_flags"] %}
-                            <li>{{ flag }}</li>
-                        {% endfor %}
-                    </ul>
-                {% endif %}
-            </section>
-        {% endif %}
-
-        {% if result.get("status") == "needs_review" %}
-            <section class="review-note">
-                <strong>Please note</strong>
-                <p>
-                    The analysis requires further review. Do not rely on
-                    incomplete or uncertain information for health decisions.
-                    Consult a qualified healthcare professional.
-                </p>
-            </section>
-        {% endif %}
-
-        <section class="results-disclaimer">
-            MediLens AI provides educational information only. It does not
-            diagnose medical conditions or replace professional medical advice.
-            Please discuss your report with a qualified healthcare professional.
-        </section>
-
-        <div class="results-actions">
-            <a href="/" class="primary-button">Analyze another report →</a>
+            </p>
         </div>
-    </main>
+    </section>
 
-    <footer class="footer">
-        <a href="/" class="brand footer-brand">
-            <span class="brand-icon">M</span>
-            <span>MediLens<span class="brand-ai"> AI</span></span>
-        </a>
-        <span>Making medical information easier to understand.</span>
-        <span>© 2026 MediLens AI</span>
-    </footer>
+    <section class="report-section">
+        <div class="report-section-heading">
+            <span class="report-section-number">01</span>
+            <div>
+                <p class="report-eyebrow">THE BIG PICTURE</p>
+                <h2>Report overview</h2>
+            </div>
+        </div>
+
+        <div class="report-summary-card">
+            <p>
+                {{ analysis.get('summary', 'Your uploaded report has been processed. The findings below provide a simple explanation of the extracted information.') }}
+            </p>
+            <div class="report-summary-meta">
+                <span>{{ findings|length }} extracted findings</span>
+                <span>Review the explanations below</span>
+            </div>
+        </div>
+    </section>
+
+    <section class="report-section">
+        <div class="report-section-heading">
+            <span class="report-section-number">02</span>
+            <div>
+                <p class="report-eyebrow">UNDERSTANDING YOUR RESULTS</p>
+                <h2>What your results show</h2>
+                <p>A simple explanation of the findings extracted from your uploaded report.</p>
+            </div>
+        </div>
+
+        <div class="report-findings-grid">
+            {% for finding in findings %}
+            <article class="report-finding">
+
+                <div class="report-finding-top">
+                    <div>
+                        <p class="report-eyebrow">EXTRACTED TEST LABEL</p>
+                        <h3 class="report-finding-name">{{ finding.get('test_name', 'Unnamed test') }}</h3>
+                    </div>
+                </div>
+
+                <div class="report-finding-value">
+                    <span class="report-value-label">Reported result</span>
+                    <strong>
+                        {{ finding.get('reported_value', finding.get('value', 'Not available')) }}
+                        {% if finding.get('unit') and not finding.get('reported_value') %}
+                            {{ finding.get('unit') }}
+                        {% endif %}
+                    </strong>
+                </div>
+
+                {% if finding.get('reference_range') %}
+                <div class="report-finding-detail">
+                    <span>Reference range</span>
+                    <strong>{{ finding.get('reference_range') }}</strong>
+                </div>
+                {% endif %}
+
+                <div class="report-finding-explanation">
+                    <p class="report-eyebrow">WHAT IT MEASURES</p>
+                    <p>
+                        {{ finding.get('what_it_measures', finding.get('description', 'This test provides information about a particular aspect of health.')) }}
+                    </p>
+                </div>
+
+                <div class="report-finding-observation">
+                    <p class="report-eyebrow">UNDERSTANDING THIS RESULT</p>
+                    <p>
+                        {{ finding.get('observation', finding.get('explanation', 'The extracted result should be interpreted in the context of the complete report and its laboratory reference ranges.')) }}
+                    </p>
+                </div>
+
+            </article>
+            {% else %}
+            <div class="report-summary-card">
+                <p>No report findings could be displayed.</p>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="report-section">
+        <div class="report-section-heading">
+            <span class="report-section-number">03</span>
+            <div>
+                <p class="report-eyebrow">UNDERSTANDING THE FINDINGS</p>
+                <h2>What this may mean</h2>
+            </div>
+        </div>
+
+        <div class="report-guidance-card">
+            <p>
+                {{ analysis.get('overall_interpretation', analysis.get('interpretation', 'The observations above explain the extracted results in general terms. Results outside printed reference ranges may need further evaluation, but they do not establish a diagnosis on their own.')) }}
+            </p>
+            <p>
+                The significance of a result depends on the complete report, the laboratory's reference ranges and the individual's medical history.
+            </p>
+        </div>
+    </section>
+
+    <section class="report-section">
+        <div class="report-section-heading">
+            <span class="report-section-number">04</span>
+            <div>
+                <p class="report-eyebrow">USEFUL NEXT STEPS</p>
+                <h2>General guidance</h2>
+            </div>
+        </div>
+
+        <div class="report-guidance-card">
+            {% if guidance is string %}
+                <p>{{ guidance }}</p>
+            {% elif guidance %}
+                <ul class="report-guidance-list">
+                    {% for item in guidance %}
+                    <li>
+                        {% if item is mapping %}
+                            {{ item.get('text', item.get('description', item)) }}
+                        {% else %}
+                            {{ item }}
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <ul class="report-guidance-list">
+                    <li>Laboratory values should be interpreted in the context of the whole clinical picture.</li>
+                    <li>If you have concerns about these results, discuss them with a qualified healthcare professional.</li>
+                </ul>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="report-section">
+        <div class="report-section-heading">
+            <span class="report-section-number">05</span>
+            <div>
+                <p class="report-eyebrow">PROFESSIONAL GUIDANCE</p>
+                <h2>Discuss with a healthcare professional</h2>
+            </div>
+        </div>
+
+        <div class="report-doctor-card">
+            <span class="report-doctor-icon">＋</span>
+            <div>
+                <h3>General physician review</h3>
+                <p>
+                    {{ analysis.get('general_physician_guidance', 'A general physician can confirm the extracted results, interpret them in relation to your health history, and determine whether any follow-up is needed.') }}
+                </p>
+            </div>
+        </div>
+
+        {% if advanced and advanced is mapping and not needs_review %}
+        <div class="report-advanced-card">
+            <p class="report-eyebrow">ADVANCED CARE</p>
+            <h3>{{ advanced.get('department', 'Specialist consultation') }}</h3>
+            <p>{{ advanced.get('reason', 'A specialist consultation may be useful for further evaluation.') }}</p>
+        </div>
+        {% endif %}
+    </section>
+
+    <section class="report-verification-panel">
+        <span class="report-verification-icon">!</span>
+        <div>
+            <h3>Important: review your original report</h3>
+            <p>
+                Automated document extraction may occasionally misread test names, values, decimal places or units. Compare the extracted information with your original laboratory report before relying on it.
+            </p>
+        </div>
+    </section>
+
+    <section class="report-disclaimer">
+        <h3>About MediLens AI</h3>
+        <p>
+            This is educational information, not a diagnosis. MediLens AI does not diagnose medical conditions or prescribe treatment. Always consult a qualified healthcare professional about your medical report.
+        </p>
+    </section>
+
+   
+    <section class="report-safety-note">
+    <span class="report-safety-icon">✓</span>
+    <div>
+        <h3>Safety review completed</h3>
+        <p>
+            Automated safety checks have been completed.
+            Medical interpretations still require professional review.
+        </p>
+    </div>
+    </section>
+
+
+    <section class="report-bottom-action">
+        <h2>Have another report?</h2>
+        <p>Upload another document to understand its contents with MediLens AI.</p>
+        <a href="/" class="primary-button">Analyze another report →</a>
+    </section>
+
+</main>
+
+<footer class="report-footer">
+    <p>© MediLens AI · Understand your health information better.</p>
+</footer>
+
 </body>
 </html>

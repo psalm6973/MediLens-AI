@@ -1,7 +1,9 @@
 
+import time
 import json
 import os
 import re
+
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -49,7 +51,11 @@ def build_medical_context(results: list[dict]) -> str:
 
         try:
             retrieved = retrieve_documents(query, top_k=2)
-        except Exception:
+        except Exception as error:
+            print(
+                f"RAG retrieval failed for {test_name}: {error}",
+                flush=True
+            )
             retrieved = []
 
         references = []
@@ -73,21 +79,21 @@ def build_medical_context(results: list[dict]) -> str:
             alternate_values.append({
                 "value": alternate.get("value"),
                 "raw_ocr_value": alternate.get("raw_ocr_value"),
-                "value_candidates": alternate.get("value_candidates", []),
-                "value_ambiguous": alternate.get("value_ambiguous", False),
-
+                "value_candidates": alternate.get(
+                    "value_candidates", []
+                ),
+                "value_ambiguous": alternate.get(
+                    "value_ambiguous", False
+                ),
                 "unit": alternate.get("unit"),
                 "raw_ocr_unit": alternate.get("raw_ocr_unit"),
-
                 "reference_range": alternate.get("reference_range"),
                 "reference_status": alternate.get("reference_status"),
                 "flag": alternate.get("flag"),
-
                 "needs_review": alternate.get("needs_review", True),
                 "needs_review_reasons": alternate.get(
                     "needs_review_reasons", []
                 ),
-
                 "original_line": alternate.get("original_line", "")
             })
 
@@ -98,16 +104,17 @@ def build_medical_context(results: list[dict]) -> str:
             "primary_result": {
                 "value": item.get("value"),
                 "raw_ocr_value": item.get("raw_ocr_value"),
-                "value_candidates": item.get("value_candidates", []),
-                "value_ambiguous": item.get("value_ambiguous", False),
-
+                "value_candidates": item.get(
+                    "value_candidates", []
+                ),
+                "value_ambiguous": item.get(
+                    "value_ambiguous", False
+                ),
                 "unit": item.get("unit"),
                 "raw_ocr_unit": item.get("raw_ocr_unit"),
-
                 "reference_range": item.get("reference_range"),
                 "reference_status": item.get("reference_status"),
                 "flag": item.get("flag"),
-
                 "needs_review": item.get("needs_review", True),
                 "needs_review_reasons": item.get(
                     "needs_review_reasons", []
@@ -121,7 +128,9 @@ def build_medical_context(results: list[dict]) -> str:
                 "needs_review_reasons", []
             ),
 
-            "correction_applied": item.get("correction_applied", False),
+            "correction_applied": item.get(
+                "correction_applied", False
+            ),
             "original_line": item.get("original_line", ""),
 
             "retrieved_references": references
@@ -255,7 +264,7 @@ def use_mock_fallback(
 
 
 # ============================================================
-# 5. ENFORCE OCR VERIFICATION
+# 5. NAME NORMALIZATION
 # ============================================================
 
 def normalize_match_name(name: str) -> str:
@@ -268,16 +277,18 @@ def normalize_match_name(name: str) -> str:
     return name
 
 
+# ============================================================
+# 6. ENFORCE VERIFICATION
+# ============================================================
+
 def enforce_verification(
     analysis: dict,
-    results: list[dict]
+    results: list[dict],
+    document_metadata: dict | None = None
 ) -> dict:
-    """
-    Parser uncertainty is authoritative.
+    """Preserve extraction uncertainty and original values."""
 
-    The LLM cannot remove a verification requirement
-    created by the parser.
-    """
+    document_metadata = document_metadata or {}
 
     result_lookup = {}
 
@@ -288,6 +299,30 @@ def enforce_verification(
         if key:
             result_lookup[key] = item
 
+    parser_needs_review = False
+    unmatched_findings = False
+
+    for item in results:
+
+        if (
+            item.get("needs_review", True)
+            or item.get("value_ambiguous", False)
+            or bool(item.get("needs_review_reasons", []))
+        ):
+            parser_needs_review = True
+
+        for alternate in item.get("alternate_values", []):
+
+            if not isinstance(alternate, dict):
+                continue
+
+            if (
+                alternate.get("needs_review", True)
+                or alternate.get("value_ambiguous", False)
+                or bool(alternate.get("needs_review_reasons", []))
+            ):
+                parser_needs_review = True
+
     for finding in analysis.get("findings", []):
 
         test_name = normalize_match_name(
@@ -296,100 +331,228 @@ def enforce_verification(
 
         original = result_lookup.get(test_name)
 
+        finding["verification_required"] = True
+        finding["source"] = None
+
         if original is None:
 
-            finding["verification_required"] = True
-            finding["source"] = None
+            unmatched_findings = True
+
+            observation = str(finding.get("observation", ""))
 
             finding["observation"] = (
-                str(finding.get("observation", ""))
-                + " The extracted finding could not be matched "
-                  "to a parsed report result and must be verified."
+                observation
+                + " This finding could not be matched to an "
+                  "extracted report result and requires verification."
             )
 
             continue
 
-        primary = original
+        original_value = original.get("value")
+        original_unit = original.get("unit")
 
-        needs_review = (
-            primary.get("needs_review", True)
-            or primary.get("value_ambiguous", False)
-            or bool(primary.get("needs_review_reasons", []))
+        finding["reported_value"] = (
+            f"{original_value} {original_unit}".strip()
+            if original_unit
+            else f"{original_value} (unit missing)"
         )
 
-        for alternate in primary.get("alternate_values", []):
-
-            if (
-                alternate.get("needs_review", True)
-                or alternate.get("value_ambiguous", False)
-                or bool(alternate.get("needs_review_reasons", []))
-            ):
-                needs_review = True
-
-        # The parser controls this field.
-        finding["verification_required"] = bool(needs_review)
-
-        # Do not attribute unrelated RAG documents
-        # as evidence for individual findings.
-        finding["source"] = None
+        needs_review = (
+            original.get("needs_review", True)
+            or original.get("value_ambiguous", False)
+            or bool(original.get("needs_review_reasons", []))
+        )
 
         if needs_review:
 
-            observation = str(
-                finding.get("observation", "")
+            observation = str(finding.get("observation", ""))
+
+            warning = (
+                " The extracted result has OCR or parsing uncertainty "
+                "and must be checked against the original laboratory report."
             )
 
-            verification_sentence = (
-                " The extracted result requires verification "
-                "against the original laboratory report."
-            )
+            if warning.strip() not in observation:
+                finding["observation"] = observation + warning
 
-            if verification_sentence.strip() not in observation:
-                finding["observation"] = (
-                    observation + verification_sentence
-                )
-
-    report_needs_review = any(
-
-        item.get("needs_review", True)
-        or item.get("value_ambiguous", False)
-        or bool(item.get("needs_review_reasons", []))
-
-        or any(
-            alternate.get("needs_review", True)
-            or alternate.get("value_ambiguous", False)
-            or bool(alternate.get("needs_review_reasons", []))
-
-            for alternate in item.get("alternate_values", [])
-        )
-
-        for item in results
+    extraction_needs_review = bool(
+        document_metadata.get("review_required", False)
     )
 
-    if report_needs_review:
+    if (
+        extraction_needs_review
+        or parser_needs_review
+        or unmatched_findings
+    ):
         analysis["status"] = "needs_review"
+
+    analysis["extraction_review_required"] = (
+        extraction_needs_review or parser_needs_review
+    )
+
+    analysis["original_report_verification_required"] = True
+
+    analysis["extraction_warnings"] = document_metadata.get(
+        "extraction_warnings", []
+    )
+
+    if extraction_needs_review or parser_needs_review:
+        analysis["advanced_care"] = None
 
     return analysis
 
 
 # ============================================================
-# 6. MEDICAL ANALYSIS AGENT
+# 7. ALIGN OUTPUT WITH RESULT.HTML
 # ============================================================
 
-def medical_analysis_agent(parsed_report: dict) -> dict:
+def prepare_display_fields(
+    analysis: dict,
+    results: list[dict]
+) -> dict:
+    """
+    Add display fields expected by result.html.
+
+    Apply conservative descriptions to known test labels.
+    Do not invent the meaning of unrecognized test names.
+    """
+
+    result_lookup = {
+        normalize_match_name(item.get("test_name", "")): item
+        for item in results
+    }
+
+    for finding in analysis.get("findings", []):
+
+        test_name = normalize_match_name(
+            finding.get("test_name", "")
+        )
+
+        original = result_lookup.get(test_name, {})
+        reference_range = original.get("reference_range")
+
+        # Match the template's expected description field.
+        finding["what_it_measures"] = finding.get(
+            "meaning",
+            "The purpose of this test could not be confidently identified."
+        )
+
+        # APTT: known test description.
+        if test_name == "aptt":
+
+            finding["what_it_measures"] = (
+                "Activated partial thromboplastin time (APTT) is a "
+                "laboratory test that measures how long blood takes "
+                "to clot through part of the coagulation pathway."
+            )
+
+        # MNAPTT: retain the label without inventing an expansion.
+        elif test_name == "mnaptt":
+
+            finding["what_it_measures"] = (
+                "The exact meaning of the laboratory label MNAPTT "
+                "could not be confidently established. Its full "
+                "meaning should be confirmed with the laboratory "
+                "or a healthcare professional."
+            )
+
+            finding["observation"] = (
+                "The extracted value is "
+                f"{finding.get('reported_value', 'not available')}. "
+                "The report information available to the system "
+                "does not include a reference range for this label. "
+                "Its significance therefore cannot be determined "
+                "reliably from the extracted information alone."
+            )
+
+            finding["verification_required"] = True
+
+        # Missing reference range: do not claim normal or abnormal.
+        if not reference_range:
+
+            finding["reference_information_available"] = False
+
+            if test_name != "mnaptt":
+
+                finding["observation"] = (
+                    str(finding.get("observation", ""))
+                    + " No reference range was available in the "
+                      "extracted information, so a range-based "
+                      "interpretation cannot be made."
+                )
+
+        else:
+            finding["reference_information_available"] = True
+
+    # Template expects overall_interpretation.
+    if not analysis.get("overall_interpretation"):
+
+        if any(
+            normalize_match_name(item.get("test_name", "")) == "mnaptt"
+            for item in results
+        ):
+            analysis["overall_interpretation"] = (
+                "The report contains APTT and MNAPTT results. "
+                "The extracted APTT value can be compared with "
+                "its printed reference range. The MNAPTT label "
+                "and its missing reference information require "
+                "clarification before its significance can be assessed."
+            )
+        else:
+            analysis["overall_interpretation"] = analysis.get(
+                "summary",
+                "The extracted findings should be interpreted "
+                "alongside the complete laboratory report."
+            )
+
+    # Template expects general_physician_guidance.
+    analysis["general_physician_guidance"] = analysis.get(
+        "general_physician_guidance",
+        analysis.get(
+            "gp_guidance",
+            "A general physician can review the complete report, "
+            "confirm the extracted information and decide whether "
+            "further evaluation is needed."
+        )
+    )
+
+    # Keep both names for compatibility with existing code.
+    analysis["gp_guidance"] = analysis["general_physician_guidance"]
+
+    return analysis
+
+
+# ============================================================
+# 8. MEDICAL ANALYSIS AGENT
+# ============================================================
+
+def medical_analysis_agent(
+    parsed_report: dict,
+    document_metadata: dict | None = None
+) -> dict:
     """
     Agent 2 workflow:
 
         1. Receive parsed report.
-        2. Retrieve medical knowledge using RAG.
-        3. Send report context to Groq GPT-OSS-120B.
-        4. Validate the response.
-        5. Enforce parser verification requirements.
-        6. Use mock fallback if Groq fails.
+        2. Receive Document Reader metadata.
+        3. Retrieve medical knowledge using RAG.
+        4. Send context to Groq.
+        5. Validate the response.
+        6. Enforce original-report verification.
+        7. Align output with result.html.
+        8. Use mock fallback if Groq fails.
     """
+
+    total_start = time.perf_counter()
 
     if not isinstance(parsed_report, dict):
         raise ValueError("Parsed report must be a dictionary.")
+
+    if document_metadata is None:
+        document_metadata = {}
+
+    if not isinstance(document_metadata, dict):
+        raise ValueError("Document metadata must be a dictionary.")
 
     results = parsed_report.get("results", [])
 
@@ -402,10 +565,26 @@ def medical_analysis_agent(parsed_report: dict) -> dict:
 
     if not results:
 
-        return use_mock_fallback(
+        analysis = use_mock_fallback(
             parsed_report,
             "No usable report results were extracted."
         )
+
+        analysis = enforce_verification(
+            analysis,
+            results,
+            document_metadata
+        )
+
+        analysis = prepare_display_fields(analysis, results)
+
+        print(
+            f"Total medical analysis time: "
+            f"{time.perf_counter() - total_start:.2f}s",
+            flush=True
+        )
+
+        return analysis
 
     # --------------------------------------------------------
     # GROQ ANALYSIS
@@ -413,110 +592,112 @@ def medical_analysis_agent(parsed_report: dict) -> dict:
 
     try:
 
+        rag_start = time.perf_counter()
+
         medical_context = build_medical_context(results)
+
+        print(
+            f"RAG context time: "
+            f"{time.perf_counter() - rag_start:.2f}s",
+            flush=True
+        )
+
+        extraction_context = {
+            "extraction_method": document_metadata.get(
+                "extraction_method"
+            ),
+            "quality_status": document_metadata.get(
+                "quality_status"
+            ),
+            "review_required": document_metadata.get(
+                "review_required", True
+            ),
+            "extraction_warnings": document_metadata.get(
+                "extraction_warnings", []
+            )
+        }
 
         prompt = f"""
 You are the medical report explanation component of MediLens-AI.
 
-Your job is to explain extracted medical report information
-in simple, understandable language.
+Explain extracted medical report information in simple language.
+This is an educational tool, NOT a diagnostic system.
 
 IMPORTANT RULES:
 
-1. This is an educational report explanation tool,
-   NOT a diagnostic system.
+1. Never diagnose a disease or prescribe medication.
+2. Treat extracted values as unverified until checked.
+3. Preserve the exact extracted values and units.
+4. Never silently correct OCR values or decimal placement.
+5. Do not invent missing values or reference ranges.
+6. Prefer reference ranges printed in the report.
+7. Do not assume a result is abnormal using an unrelated range.
+8. Explain uncertainty clearly.
+9. Do not invent test-name expansions.
+10. If a test label is unclear, preserve its original name.
+11. Do not confidently explain an unrecognized test.
+12. Every finding must require verification against the original report.
+13. Do not treat RAG references as proof of extracted values.
+14. Recommend general physician review when appropriate.
+15. Add an Advanced Care department only when strongly supported.
+16. Never recommend individual doctors.
+17. Do not provide medication doses or treatment instructions.
+18. Do not infer missing patient details.
+19. Do not describe extracted values as clinically confirmed.
+20. Keep explanations concise, specific and non-repetitive.
 
-2. Never diagnose a disease or prescribe medication.
+SPECIFIC TEST-NAME SAFEGUARDS:
 
-3. Treat every extracted result as an unverified OCR candidate.
+- APTT is Activated Partial Thromboplastin Time. It is a blood
+  coagulation test. Explain this only when the extracted label
+  is exactly APTT.
 
-4. Preserve primary values, raw OCR values, normalized units
-   and original OCR units.
+- MNAPTT must remain MNAPTT. Do not expand this abbreviation,
+  assume it is a variation of APTT, or invent its laboratory
+  meaning. If its meaning is not established by reliable context,
+  state that clarification is needed.
 
-5. Treat primary and alternate values as separate OCR candidates.
+- A missing reference range means the result cannot be reliably
+  classified using a range. Do not call it normal or abnormal.
 
-6. Never assume that the first number on a line is correct.
+DOCUMENT EXTRACTION INFORMATION:
 
-7. If multiple possible values exist, explain the ambiguity
-   and require verification.
-
-8. Never silently correct numeric OCR values.
-
-9. If primary and alternate values differ, preserve both.
-   Do not assume they are errors merely because the numbers differ;
-   their units may be different.
-
-10. A normalized unit is a controlled OCR correction,
-    not proof that the original unit was read correctly.
-
-11. If needs_review is true, clearly mention that the value
-    requires verification against the original report.
-
-12. Prefer the reference range printed in the report.
-
-13. Do not assume a value is abnormal based only on
-    a general reference document.
-
-14. Use retrieved references only when relevant.
-    Do not invent facts or citations.
-
-15. If information is insufficient, clearly say so.
-
-16. Recommend general physician review when appropriate.
-
-17. Add an Advanced Care department only when the available
-    report evidence strongly supports further evaluation.
-    Never recommend individual doctors.
-
-18. Do not provide treatment instructions or medication doses.
-
-19. Do not treat OCR flags or reference-status labels as
-    confirmed clinical interpretations.
-
-20. If OCR verification is required, do not present the
-    finding as a confirmed abnormality.
-
-21. Do not infer a patient's age, sex, medical history
-    or other missing information.
-
-22. Explain uncertainty rather than guessing.
+{json.dumps(extraction_context, indent=2, default=str)}
 
 EXTRACTED REPORT INFORMATION AND RETRIEVED REFERENCES:
 
 {medical_context}
 
-Return ONLY valid JSON using this exact structure:
+Return ONLY valid JSON using this structure:
 
 {{
     "status": "success",
-    "summary": "Simple overall explanation of the available report.",
+    "summary": "A concise, report-specific overview.",
+    "overall_interpretation": "A concise explanation of what the available findings collectively show and what remains uncertain.",
     "findings": [
         {{
-            "test_name": "Test name",
-            "reported_value": "Primary extracted value and unit",
-            "meaning": "General explanation of what this test measures.",
-            "observation": "Careful explanation of the available result.",
+            "test_name": "Original extracted test name",
+            "reported_value": "Extracted value and unit",
+            "meaning": "What the test measures, if reliably known.",
+            "observation": "Careful interpretation using the available reference information.",
             "verification_required": true,
             "source": null
         }}
     ],
     "general_guidance": [
-        "General, safe guidance relevant to the report."
+        "Relevant, safe and concise guidance."
     ],
-    "gp_guidance": "When and why general physician review may be useful.",
-    "advanced_care": {{
-        "department": "Department name",
-        "reason": "Evidence-based reason for further evaluation."
-    }},
+    "gp_guidance": "Useful general physician guidance.",
+    "general_physician_guidance": "Useful general physician guidance.",
+    "advanced_care": null,
     "disclaimer": "This is educational information, not a diagnosis."
 }}
 
-If no specialist department is clearly supported,
-set advanced_care to null.
+If a specialist department is not strongly supported,
+advanced_care must be null.
 
-If information is insufficient, explain the limitation.
-
-Do not invent missing values or reference ranges.
+Do not repeat the same warning in multiple sections.
+Do not invent missing reference ranges or test meanings.
 """
 
         print("\n--- GROQ REQUEST DEBUG ---", flush=True)
@@ -524,13 +705,15 @@ Do not invent missing values or reference ranges.
         print("Prompt length:", len(prompt), flush=True)
         print("Report results:", len(results), flush=True)
         print(
-            "Retrieved context length:",
-            len(medical_context),
+            "Extraction review required:",
+            extraction_context["review_required"],
             flush=True
         )
         print("--------------------------\n", flush=True)
 
         client = get_groq_client()
+
+        groq_start = time.perf_counter()
 
         response = client.chat.completions.create(
             model="openai/gpt-oss-120b",
@@ -547,6 +730,12 @@ Do not invent missing values or reference ranges.
             }
         )
 
+        print(
+            f"Groq response time: "
+            f"{time.perf_counter() - groq_start:.2f}s",
+            flush=True
+        )
+
         if not response.choices:
             raise ValueError("Groq returned no response choices.")
 
@@ -557,14 +746,15 @@ Do not invent missing values or reference ranges.
 
         analysis = json.loads(response_text)
 
-        if not isinstance(analysis, dict):
-            raise ValueError(
-                "Groq returned an unexpected response format."
-            )
-
         analysis = validate_medical_analysis(analysis)
 
-        analysis = enforce_verification(analysis, results)
+        analysis = enforce_verification(
+            analysis,
+            results,
+            document_metadata
+        )
+
+        analysis = prepare_display_fields(analysis, results)
 
         analysis = validate_medical_analysis(analysis)
 
@@ -572,6 +762,12 @@ Do not invent missing values or reference ranges.
 
         print(
             "Groq analysis completed and passed validation.",
+            flush=True
+        )
+
+        print(
+            f"Total medical analysis time: "
+            f"{time.perf_counter() - total_start:.2f}s",
             flush=True
         )
 
@@ -583,7 +779,23 @@ Do not invent missing values or reference ranges.
             f"{type(error).__name__}: {str(error)}"
         )
 
-        return use_mock_fallback(
+        analysis = use_mock_fallback(
             parsed_report,
             fallback_reason
         )
+
+        analysis = enforce_verification(
+            analysis,
+            results,
+            document_metadata
+        )
+
+        analysis = prepare_display_fields(analysis, results)
+
+        print(
+            f"Total medical analysis time: "
+            f"{time.perf_counter() - total_start:.2f}s",
+            flush=True
+        )
+
+        return analysis
