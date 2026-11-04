@@ -1,7 +1,7 @@
 
 import json
 import os
-
+import re
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -34,12 +34,7 @@ def get_groq_client():
 # ============================================================
 
 def build_medical_context(results: list[dict]) -> str:
-    """
-    Retrieve relevant medical reference information.
-
-    Preserve primary values, alternate values, raw OCR data,
-    normalized units and verification information.
-    """
+    """Build report context while preserving OCR uncertainty."""
 
     context_sections = []
 
@@ -48,11 +43,14 @@ def build_medical_context(results: list[dict]) -> str:
         test_name = item.get("test_name", "Unknown test")
 
         query = (
-            f"{test_name}: purpose, meaning, reference range "
-            "and factors that may affect this test"
+            f"{test_name}: purpose, meaning, and general "
+            "medical interpretation"
         )
 
-        retrieved = retrieve_documents(query, top_k=1)
+        try:
+            retrieved = retrieve_documents(query, top_k=2)
+        except Exception:
+            retrieved = []
 
         references = []
 
@@ -61,11 +59,10 @@ def build_medical_context(results: list[dict]) -> str:
             metadata = result.get("metadata") or {}
 
             references.append({
-                "source": metadata.get("source", "Unknown source"),
-                "content": result.get("document", "")[:300]
+                "source": metadata.get("source"),
+                "content": result.get("document", "")[:500]
             })
 
-        # Preserve alternate measurement rows.
         alternate_values = []
 
         for alternate in item.get("alternate_values", []):
@@ -76,15 +73,21 @@ def build_medical_context(results: list[dict]) -> str:
             alternate_values.append({
                 "value": alternate.get("value"),
                 "raw_ocr_value": alternate.get("raw_ocr_value"),
+                "value_candidates": alternate.get("value_candidates", []),
+                "value_ambiguous": alternate.get("value_ambiguous", False),
+
                 "unit": alternate.get("unit"),
                 "raw_ocr_unit": alternate.get("raw_ocr_unit"),
-                "unit_correction_applied": alternate.get(
-                    "unit_correction_applied", False
-                ),
+
                 "reference_range": alternate.get("reference_range"),
                 "reference_status": alternate.get("reference_status"),
                 "flag": alternate.get("flag"),
+
                 "needs_review": alternate.get("needs_review", True),
+                "needs_review_reasons": alternate.get(
+                    "needs_review_reasons", []
+                ),
+
                 "original_line": alternate.get("original_line", "")
             })
 
@@ -95,24 +98,30 @@ def build_medical_context(results: list[dict]) -> str:
             "primary_result": {
                 "value": item.get("value"),
                 "raw_ocr_value": item.get("raw_ocr_value"),
+                "value_candidates": item.get("value_candidates", []),
+                "value_ambiguous": item.get("value_ambiguous", False),
+
                 "unit": item.get("unit"),
                 "raw_ocr_unit": item.get("raw_ocr_unit"),
-                "unit_correction_applied": item.get(
-                    "unit_correction_applied", False
-                ),
+
                 "reference_range": item.get("reference_range"),
-                "reference_status": item.get(
-                    "reference_status", "unknown"
-                ),
-                "flag": item.get("flag")
+                "reference_status": item.get("reference_status"),
+                "flag": item.get("flag"),
+
+                "needs_review": item.get("needs_review", True),
+                "needs_review_reasons": item.get(
+                    "needs_review_reasons", []
+                )
             },
 
             "alternate_results": alternate_values,
 
             "needs_review": item.get("needs_review", True),
-            "correction_applied": item.get(
-                "correction_applied", False
+            "needs_review_reasons": item.get(
+                "needs_review_reasons", []
             ),
+
+            "correction_applied": item.get("correction_applied", False),
             "original_line": item.get("original_line", ""),
 
             "retrieved_references": references
@@ -231,10 +240,7 @@ def use_mock_fallback(
     parsed_report: dict,
     reason: str
 ) -> dict:
-    """
-    Activate deterministic fallback when Groq analysis
-    is unavailable or its response cannot be validated.
-    """
+    """Activate deterministic fallback if Groq fails."""
 
     print("\n--- MOCK FALLBACK ACTIVATED ---", flush=True)
     print("Reason:", reason, flush=True)
@@ -249,7 +255,125 @@ def use_mock_fallback(
 
 
 # ============================================================
-# 5. MEDICAL ANALYSIS AGENT
+# 5. ENFORCE OCR VERIFICATION
+# ============================================================
+
+def normalize_match_name(name: str) -> str:
+    """Normalize names for matching findings to parsed results."""
+
+    name = str(name or "").lower().strip()
+    name = re.sub(r"\s+", " ", name)
+    name = re.sub(r"[^a-z0-9 ]", "", name)
+
+    return name
+
+
+def enforce_verification(
+    analysis: dict,
+    results: list[dict]
+) -> dict:
+    """
+    Parser uncertainty is authoritative.
+
+    The LLM cannot remove a verification requirement
+    created by the parser.
+    """
+
+    result_lookup = {}
+
+    for item in results:
+
+        key = normalize_match_name(item.get("test_name", ""))
+
+        if key:
+            result_lookup[key] = item
+
+    for finding in analysis.get("findings", []):
+
+        test_name = normalize_match_name(
+            finding.get("test_name", "")
+        )
+
+        original = result_lookup.get(test_name)
+
+        if original is None:
+
+            finding["verification_required"] = True
+            finding["source"] = None
+
+            finding["observation"] = (
+                str(finding.get("observation", ""))
+                + " The extracted finding could not be matched "
+                  "to a parsed report result and must be verified."
+            )
+
+            continue
+
+        primary = original
+
+        needs_review = (
+            primary.get("needs_review", True)
+            or primary.get("value_ambiguous", False)
+            or bool(primary.get("needs_review_reasons", []))
+        )
+
+        for alternate in primary.get("alternate_values", []):
+
+            if (
+                alternate.get("needs_review", True)
+                or alternate.get("value_ambiguous", False)
+                or bool(alternate.get("needs_review_reasons", []))
+            ):
+                needs_review = True
+
+        # The parser controls this field.
+        finding["verification_required"] = bool(needs_review)
+
+        # Do not attribute unrelated RAG documents
+        # as evidence for individual findings.
+        finding["source"] = None
+
+        if needs_review:
+
+            observation = str(
+                finding.get("observation", "")
+            )
+
+            verification_sentence = (
+                " The extracted result requires verification "
+                "against the original laboratory report."
+            )
+
+            if verification_sentence.strip() not in observation:
+                finding["observation"] = (
+                    observation + verification_sentence
+                )
+
+    report_needs_review = any(
+
+        item.get("needs_review", True)
+        or item.get("value_ambiguous", False)
+        or bool(item.get("needs_review_reasons", []))
+
+        or any(
+            alternate.get("needs_review", True)
+            or alternate.get("value_ambiguous", False)
+            or bool(alternate.get("needs_review_reasons", []))
+
+            for alternate in item.get("alternate_values", [])
+        )
+
+        for item in results
+    )
+
+    if report_needs_review:
+        analysis["status"] = "needs_review"
+
+    return analysis
+
+
+# ============================================================
+# 6. MEDICAL ANALYSIS AGENT
 # ============================================================
 
 def medical_analysis_agent(parsed_report: dict) -> dict:
@@ -259,8 +383,9 @@ def medical_analysis_agent(parsed_report: dict) -> dict:
         1. Receive parsed report.
         2. Retrieve medical knowledge using RAG.
         3. Send report context to Groq GPT-OSS-120B.
-        4. Validate the model response.
-        5. Activate mock fallback if anything fails.
+        4. Validate the response.
+        5. Enforce parser verification requirements.
+        6. Use mock fallback if Groq fails.
     """
 
     if not isinstance(parsed_report, dict):
@@ -298,8 +423,8 @@ in simple, understandable language.
 
 IMPORTANT RULES:
 
-1. This is an educational report explanation tool, NOT a
-   diagnostic system.
+1. This is an educational report explanation tool,
+   NOT a diagnostic system.
 
 2. Never diagnose a disease or prescribe medication.
 
@@ -308,48 +433,53 @@ IMPORTANT RULES:
 4. Preserve primary values, raw OCR values, normalized units
    and original OCR units.
 
-5. Preserve alternate measurements. Never silently discard,
-   combine, average or replace an alternate value.
+5. Treat primary and alternate values as separate OCR candidates.
 
-6. Never silently correct numeric OCR values.
+6. Never assume that the first number on a line is correct.
 
-7. If primary and alternate values disagree, clearly explain
-   that the extracted information needs manual verification.
+7. If multiple possible values exist, explain the ambiguity
+   and require verification.
 
-8. A normalized unit is a controlled OCR correction, not
-   proof that the original unit was read correctly.
+8. Never silently correct numeric OCR values.
 
-9. If needs_review is true, clearly mention that the value
-   requires verification against the original report.
+9. If primary and alternate values differ, preserve both.
+   Do not assume they are errors merely because the numbers differ;
+   their units may be different.
 
-10. Prefer the reference range printed in the report.
+10. A normalized unit is a controlled OCR correction,
+    not proof that the original unit was read correctly.
 
-11. Do not assume a value is abnormal based only on a
-    general reference document.
+11. If needs_review is true, clearly mention that the value
+    requires verification against the original report.
 
-12. Use retrieved references only when relevant.
+12. Prefer the reference range printed in the report.
+
+13. Do not assume a value is abnormal based only on
+    a general reference document.
+
+14. Use retrieved references only when relevant.
     Do not invent facts or citations.
 
-13. If information is insufficient, clearly say so.
+15. If information is insufficient, clearly say so.
 
-14. Recommend general physician review when appropriate.
+16. Recommend general physician review when appropriate.
 
-15. Add an Advanced Care department only when the available
+17. Add an Advanced Care department only when the available
     report evidence strongly supports further evaluation.
     Never recommend individual doctors.
 
-16. Do not provide treatment instructions or medication doses.
+18. Do not provide treatment instructions or medication doses.
 
-17. Do not treat OCR flags or reference-status labels as
+19. Do not treat OCR flags or reference-status labels as
     confirmed clinical interpretations.
 
-18. If OCR verification is required, do not present the
+20. If OCR verification is required, do not present the
     finding as a confirmed abnormality.
 
-19. Do not infer a patient's age, sex, medical history or
-    other missing information.
+21. Do not infer a patient's age, sex, medical history
+    or other missing information.
 
-20. Explain uncertainty rather than guessing.
+22. Explain uncertainty rather than guessing.
 
 EXTRACTED REPORT INFORMATION AND RETRIEVED REFERENCES:
 
@@ -367,7 +497,7 @@ Return ONLY valid JSON using this exact structure:
             "meaning": "General explanation of what this test measures.",
             "observation": "Careful explanation of the available result.",
             "verification_required": true,
-            "source": "Retrieved reference filename or unavailable"
+            "source": null
         }}
     ],
     "general_guidance": [
@@ -389,7 +519,6 @@ If information is insufficient, explain the limitation.
 Do not invent missing values or reference ranges.
 """
 
-        # Debug information
         print("\n--- GROQ REQUEST DEBUG ---", flush=True)
         print("Model: openai/gpt-oss-120b", flush=True)
         print("Prompt length:", len(prompt), flush=True)
@@ -432,6 +561,10 @@ Do not invent missing values or reference ranges.
             raise ValueError(
                 "Groq returned an unexpected response format."
             )
+
+        analysis = validate_medical_analysis(analysis)
+
+        analysis = enforce_verification(analysis, results)
 
         analysis = validate_medical_analysis(analysis)
 
