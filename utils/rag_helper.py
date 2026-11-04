@@ -6,7 +6,10 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 
 
-# Project paths
+# ============================================================
+# 1. PROJECT CONFIGURATION
+# ============================================================
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 KNOWLEDGE_BASE_PATH = (
@@ -17,32 +20,48 @@ DOCUMENTS_PATH = (
     PROJECT_ROOT / "data" / "knowledge_base" / "documents"
 )
 
-# Embedding model
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 COLLECTION_NAME = "medical_knowledge"
 
 
+# ============================================================
+# 2. LOAD AND CACHE MODELS / DATABASE CONNECTIONS
+# ============================================================
+
 @lru_cache(maxsize=1)
 def get_embedding_model():
     """Load and reuse the embedding model."""
+
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
 
-def get_collection():
-    """Connect to the local ChromaDB collection."""
+@lru_cache(maxsize=1)
+def get_chroma_client():
+    """Create and reuse the persistent ChromaDB client."""
 
     KNOWLEDGE_BASE_PATH.mkdir(parents=True, exist_ok=True)
 
-    client = chromadb.PersistentClient(
+    return chromadb.PersistentClient(
         path=str(KNOWLEDGE_BASE_PATH)
     )
+
+
+@lru_cache(maxsize=1)
+def get_collection():
+    """Get and reuse the medical knowledge collection."""
+
+    client = get_chroma_client()
 
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"description": "Medical reference knowledge"}
     )
 
+
+# ============================================================
+# 3. ADD DOCUMENTS
+# ============================================================
 
 def add_documents(
     documents: list[str],
@@ -69,7 +88,10 @@ def add_documents(
     model = get_embedding_model()
     collection = get_collection()
 
-    embeddings = model.encode(documents).tolist()
+    embeddings = model.encode(
+        documents,
+        convert_to_numpy=True
+    ).tolist()
 
     collection.upsert(
         ids=ids,
@@ -79,39 +101,81 @@ def add_documents(
     )
 
 
-def retrieve_documents(
-    query: str,
-    top_k: int = 3,
-) -> list[dict]:
-    """Retrieve relevant medical knowledge with source information."""
+# ============================================================
+# 4. BATCH RETRIEVAL
+# ============================================================
 
-    if not query.strip():
-        raise ValueError("Search query cannot be empty.")
+def retrieve_documents_batch(
+    queries: list[str],
+    top_k: int = 2,
+) -> list[list[dict]]:
+    """
+    Retrieve relevant documents for multiple queries
+    using a single embedding batch and ChromaDB query.
+    """
+
+    if not queries:
+        return []
+
+    if any(not isinstance(query, str) or not query.strip()
+           for query in queries):
+        raise ValueError("Queries cannot be empty.")
 
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
 
     collection = get_collection()
 
-    if collection.count() == 0:
-        return []
+    count = collection.count()
+
+    if count == 0:
+        return [[] for _ in queries]
 
     model = get_embedding_model()
-    query_embedding = model.encode([query]).tolist()
 
+    # Generate all query embeddings together.
+    query_embeddings = model.encode(
+        queries,
+        convert_to_numpy=True
+    ).tolist()
+
+    # Search all queries in one ChromaDB call.
     results = collection.query(
-        query_embeddings=query_embedding,
-        n_results=min(top_k, collection.count()),
+        query_embeddings=query_embeddings,
+        n_results=min(top_k, count),
         include=["documents", "distances", "metadatas"],
     )
 
-    retrieved_documents = []
+    all_retrieved = []
 
-    for i, document in enumerate(results["documents"][0]):
-        retrieved_documents.append({
-            "document": document,
-            "distance": results["distances"][0][i],
-            "metadata": results["metadatas"][0][i],
-        })
+    for query_index, documents in enumerate(results["documents"]):
 
-    return retrieved_documents
+        retrieved_documents = []
+
+        for document_index, document in enumerate(documents):
+
+            retrieved_documents.append({
+                "document": document,
+                "distance": results["distances"][query_index][document_index],
+                "metadata": results["metadatas"][query_index][document_index],
+            })
+
+        all_retrieved.append(retrieved_documents)
+
+    return all_retrieved
+
+
+# ============================================================
+# 5. SINGLE QUERY RETRIEVAL - BACKWARD COMPATIBILITY
+# ============================================================
+
+def retrieve_documents(
+    query: str,
+    top_k: int = 3,
+) -> list[dict]:
+    """Retrieve relevant medical knowledge for one query."""
+
+    return retrieve_documents_batch(
+        [query],
+        top_k=top_k
+    )[0]

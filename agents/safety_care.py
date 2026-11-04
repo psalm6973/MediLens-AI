@@ -3,7 +3,6 @@ import re
 from copy import deepcopy
 
 
-# Phrases that may indicate an unsafe or overly certain medical claim.
 DIAGNOSIS_PATTERNS = [
     r"\byou have been diagnosed with\b",
     r"\byou are diagnosed with\b",
@@ -12,7 +11,6 @@ DIAGNOSIS_PATTERNS = [
     r"\byou have a confirmed case of\b",
 ]
 
-# Phrases that may indicate medication or treatment instructions.
 TREATMENT_PATTERNS = [
     r"\bstop taking\b",
     r"\bstart taking\b",
@@ -25,7 +23,7 @@ TREATMENT_PATTERNS = [
 
 
 def collect_analysis_text(analysis: dict) -> str:
-    """Collect the generated medical explanation into searchable text."""
+    """Collect generated medical explanation into searchable text."""
 
     text_parts = [
         str(analysis.get("summary", "")),
@@ -53,17 +51,19 @@ def collect_analysis_text(analysis: dict) -> str:
 
 def safety_care_agent(analysis: dict) -> dict:
     """
-    Perform a basic safety check on the Medical Analysis Agent's output.
+    Perform basic rule-based safety checks.
 
-    This is a rule-based software check, not a clinical review.
-    It does not verify whether medical interpretations are correct.
+    This is not a clinical review and does not verify
+    the correctness of medical interpretations.
     """
 
     if not isinstance(analysis, dict):
         return {
             "status": "needs_review",
             "review_required": True,
-            "safety_flags": ["The medical analysis output is not a dictionary."],
+            "safety_flags": [
+                "The medical analysis output is not a dictionary."
+            ],
             "analysis": None,
             "message": "The analysis could not pass the safety checks.",
         }
@@ -71,7 +71,6 @@ def safety_care_agent(analysis: dict) -> dict:
     checked_analysis = deepcopy(analysis)
     safety_flags = []
 
-    # Check required output fields.
     required_fields = [
         "status",
         "summary",
@@ -86,23 +85,22 @@ def safety_care_agent(analysis: dict) -> dict:
         if field not in checked_analysis:
             safety_flags.append(f"Missing required field: {field}")
 
-    # Check important field types.
     if not isinstance(checked_analysis.get("summary"), str):
-        safety_flags.append("The summary is missing or has an invalid format.")
+        safety_flags.append("Summary has an invalid format.")
 
     if not isinstance(checked_analysis.get("findings"), list):
-        safety_flags.append("Findings must be provided as a list.")
+        safety_flags.append("Findings must be a list.")
 
     if not isinstance(checked_analysis.get("general_guidance"), list):
-        safety_flags.append("General guidance must be provided as a list.")
+        safety_flags.append("General guidance must be a list.")
 
     if not isinstance(checked_analysis.get("gp_guidance"), str):
-        safety_flags.append("GP guidance is missing or has an invalid format.")
+        safety_flags.append("GP guidance has an invalid format.")
 
     if not isinstance(checked_analysis.get("disclaimer"), str):
-        safety_flags.append("The disclaimer is missing or has an invalid format.")
+        safety_flags.append("Disclaimer has an invalid format.")
 
-    # Check individual findings.
+    # Validate individual findings.
     findings = checked_analysis.get("findings", [])
 
     if isinstance(findings, list):
@@ -113,12 +111,31 @@ def safety_care_agent(analysis: dict) -> dict:
                 )
                 continue
 
-            if not isinstance(finding.get("verification_required"), bool):
+            if finding.get("verification_required") is not True:
                 safety_flags.append(
-                    f"Finding {index + 1} has an invalid verification status."
+                    f"Finding {index + 1} must require verification "
+                    "against the original report."
                 )
 
-    # Check Advanced Care information.
+                # Fail safely: never remove this requirement.
+                finding["verification_required"] = True
+
+    # Original report verification must remain mandatory.
+    if checked_analysis.get(
+        "original_report_verification_required"
+    ) is not True:
+        safety_flags.append(
+            "Original report verification requirement is missing."
+        )
+        checked_analysis[
+            "original_report_verification_required"
+        ] = True
+
+    # Preserve extraction review information.
+    if checked_analysis.get("extraction_review_required") is True:
+        checked_analysis["status"] = "needs_review"
+
+    # Validate Advanced Care.
     advanced_care = checked_analysis.get("advanced_care")
 
     if advanced_care is not None:
@@ -126,13 +143,18 @@ def safety_care_agent(analysis: dict) -> dict:
             safety_flags.append(
                 "Advanced Care must be a dictionary or null."
             )
-        elif not advanced_care.get("department") or not advanced_care.get("reason"):
+        elif (
+            not advanced_care.get("department")
+            or not advanced_care.get("reason")
+        ):
             safety_flags.append(
                 "Advanced Care is missing its department or reason."
             )
 
-    # Check for potentially unsafe wording.
-    searchable_text = collect_analysis_text(checked_analysis).lower()
+    # Check potentially unsafe wording.
+    searchable_text = collect_analysis_text(
+        checked_analysis
+    ).lower()
 
     for pattern in DIAGNOSIS_PATTERNS:
         if re.search(pattern, searchable_text):
@@ -148,26 +170,27 @@ def safety_care_agent(analysis: dict) -> dict:
             )
             break
 
-    # Ensure the response includes a healthcare-professional reminder.
-    gp_guidance = checked_analysis.get("gp_guidance", "")
+    # GP guidance must not be empty.
+    gp_guidance = checked_analysis.get("gp_guidance")
 
     if isinstance(gp_guidance, str) and not gp_guidance.strip():
         safety_flags.append("GP guidance is empty.")
 
-    # Produce the safety-check result.
-    review_required = len(safety_flags) > 0
+    # Determine safety-check result.
+    review_required = bool(safety_flags)
 
     if review_required:
         status = "needs_review"
         message = (
             "Potential safety or formatting concerns were detected. "
-            "The output should be reviewed before being shown to the user."
+            "The output should be reviewed."
         )
     else:
         status = "passed_checks"
         message = (
             "No issues were detected by the basic safety rules. "
-            "This does not mean the medical interpretation is clinically verified."
+            "This does not mean the medical interpretation is "
+            "clinically verified."
         )
 
     return {
