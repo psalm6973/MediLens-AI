@@ -85,16 +85,25 @@ def document_reader_agent(file_path: str) -> dict:
                 flush=True
             )
 
-            if docling_count > 0:
+            if docling_report.get("status") == "extraction_failed":
+                warnings.append(
+                    "Docling produced no readable text. Trying Tesseract fallback."
+                )
+
+            else:
+                # Readable Docling text is a successful extraction even when
+                # the parser cannot yet structure its contents. Preserve it
+                # for review instead of rerunning OCR and replacing the text.
                 extracted_text = docling_text
                 parsed_report = docling_report
                 extraction_method = "docling"
 
-            else:
-                warnings.append(
-                    "Docling returned content, but no test results "
-                    "were identified. Trying Tesseract fallback."
-                )
+                if docling_count == 0:
+                    warnings.append(
+                        "Docling extracted readable content, but no structured "
+                        "test results were identified. Tesseract fallback was "
+                        "not triggered because text extraction succeeded."
+                    )
 
         else:
             warnings.append(

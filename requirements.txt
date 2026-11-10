@@ -20,3 +20,4 @@ httpx
 opencv-python
 
 docling
+groq

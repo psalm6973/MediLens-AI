@@ -2,6 +2,8 @@ from pathlib import Path
 from typing import Any
 import re
 
+from utils.general_table_parser import parse_docling_table_text
+
 
 # ============================================================
 # 1. PATTERNS AND UNIT NORMALIZATION
@@ -24,6 +26,22 @@ UNIT_CORRECTIONS = {
     "u/l": "U/L",
     "miu/l": "mIU/L",
     "fl": "fL",
+}
+
+OCR_UNIT_CANDIDATES = {
+    # Common OCR character confusions in laboratory unit columns.
+    # These are tentative normalizations: the raw text is retained and
+    # every such correction is flagged for visual verification.
+    "ip/8": "g/dL",
+    "ip/6": "g/dL",
+    "7p/6": "g/dL",
+    "1/6": "g/L",
+    "m/dl": "mg/dL",
+    "mdl": "mg/dL",
+    "u/i": "U/L",
+    "iu/": "IU/L",
+    "1u/i": "IU/L",
+    "mg%": "mg/dL",
 }
 
 KNOWN_UNITS = {
@@ -92,6 +110,11 @@ def normalize_unit(raw_unit: str | None):
     raw = clean_text(raw_unit)
     key = raw.lower()
 
+    # OCR-confusable strings are retained in raw_ocr_unit and only mapped
+    # to a tentative canonical unit. create_test_entry marks these for review.
+    if key in OCR_UNIT_CANDIDATES:
+        return OCR_UNIT_CANDIDATES[key], True, True
+
     if key in UNIT_CORRECTIONS:
         normalized = UNIT_CORRECTIONS[key]
         return normalized, normalized != raw, True
@@ -100,8 +123,6 @@ def normalize_unit(raw_unit: str | None):
         return raw, False, True
 
     return raw, False, False
-
-
 def parse_range_parts(low_text: str, high_text: str):
     low_match = re.search(NUMBER, low_text or "")
     high_match = re.search(NUMBER, high_text or "")
@@ -120,6 +141,25 @@ def parse_range_parts(low_text: str, high_text: str):
 
 def parse_plain_range(line: str):
     cleaned = clean_text(line)
+    cleaned = cleaned.replace("&lt;", "<").replace("&gt;", ">")
+    cleaned = cleaned.replace("≤", "<=").replace("≥", ">=")
+
+    # Some laboratories print a one-sided decision limit, e.g. <50 or >5.
+    # Preserve it as a one-sided limit instead of inventing a lower/upper bound.
+    bound_match = re.fullmatch(
+        rf"(?P<operator><=|>=|<|>)\s*(?P<value>{NUMBER})",
+        cleaned,
+    )
+    if bound_match:
+        value_text = bound_match.group("value")
+        if "," in value_text and not re.fullmatch(r"\d{1,3}(?:,\d{3})+", value_text):
+            return None
+        return {
+            "type": "upper_limit" if bound_match.group("operator").startswith("<") else "lower_limit",
+            "operator": bound_match.group("operator"),
+            "value": to_number(value_text),
+        }
+
     match = PLAIN_RANGE_RE.search(cleaned)
 
     if not match:
@@ -138,11 +178,23 @@ def parse_plain_range(line: str):
         return None
 
     return {"type": "range", "low": low, "high": high}
-
-
 def check_reference_status(value, reference_range):
     if not reference_range:
         return "unknown"
+
+    reference_type = reference_range.get("type", "range")
+
+    if reference_type == "upper_limit":
+        limit = reference_range["value"]
+        operator = reference_range.get("operator", "<")
+        is_within = value < limit if operator == "<" else value <= limit
+        return "within" if is_within else "above"
+
+    if reference_type == "lower_limit":
+        limit = reference_range["value"]
+        operator = reference_range.get("operator", ">")
+        is_within = value > limit if operator == ">" else value >= limit
+        return "within" if is_within else "below"
 
     if value < reference_range["low"]:
         return "below"
@@ -151,8 +203,6 @@ def check_reference_status(value, reference_range):
         return "above"
 
     return "within"
-
-
 def extract_flag(raw_flag: str | None):
     if not raw_flag:
         return None
@@ -289,6 +339,13 @@ def create_test_entry(
         raw_unit,
         extra_review_reasons,
     )
+
+    if raw_unit and clean_text(raw_unit).lower() in OCR_UNIT_CANDIDATES:
+        candidate_unit = OCR_UNIT_CANDIDATES[clean_text(raw_unit).lower()]
+        reasons.append(
+            f"Unit OCR candidate '{raw_unit}' was tentatively interpreted as "
+            f"'{candidate_unit}'; verify it against the original report"
+        )
 
     flag = extract_flag(raw_flag)
 
@@ -1114,6 +1171,42 @@ def parse_report_text(text: str) -> dict[str, Any]:
             "disclaimer": (
                 "No report values were extracted. "
                 "Do not perform medical analysis on this document."
+            ),
+        }
+
+    # Prefer header-driven interpretation for Docling Markdown tables.
+    # OCR output itself is preserved; uncertain units remain flagged.
+    dynamic_table = parse_docling_table_text(
+        meaningful_text,
+        create_test_entry=create_test_entry,
+        normalize_test_name=normalize_test_name,
+        parse_range_parts=parse_range_parts,
+        parse_plain_range=parse_plain_range,
+        attach_alternate_value=attach_alternate_value,
+        is_si_marker=is_si_marker,
+        is_valid_test_label=is_valid_test_label,
+    )
+    if dynamic_table is not None:
+        table_results, table_unparsed_lines = dynamic_table
+        return {
+            "results": table_results,
+            "unassigned_values": [],
+            "unparsed_lines": table_unparsed_lines,
+            "result_count": len(table_results),
+            "unassigned_value_count": 0,
+            "parser_version": "8.0-dynamic-tables",
+            "status": "success" if table_results else "parsing_failed",
+            "failure_reason": (
+                None
+                if table_results
+                else "A table was detected, but no numeric result rows could be safely interpreted."
+            ),
+            "disclaimer": (
+                "Extracted values are unverified report candidates. "
+                "Test names, values, units and reference ranges must be "
+                "checked against the original report. "
+                "This parser does not provide medical diagnoses or "
+                "treatment recommendations."
             ),
         }
 

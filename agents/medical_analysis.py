@@ -430,6 +430,33 @@ def prepare_display_fields(
 
         original = result_lookup.get(test_name, {})
         reference_range = original.get("reference_range")
+        # Display the laboratory's actual interval, including one-sided limits.
+        # The parser's structured range remains unchanged in parsed_report.
+        display_range = None
+        if isinstance(reference_range, dict):
+            range_type = reference_range.get("type", "range")
+            unit_text = original.get("unit") or ""
+
+            if range_type == "range":
+                low = reference_range.get("low")
+                high = reference_range.get("high")
+                if low is not None and high is not None:
+                    display_range = f"{float(low):g} - {float(high):g}"
+            elif range_type in {"upper_limit", "lower_limit"}:
+                limit = reference_range.get("value")
+                if limit is not None:
+                    default_operator = "<" if range_type == "upper_limit" else ">"
+                    operator = reference_range.get("operator", default_operator)
+                    display_range = f"{operator}{float(limit):g}"
+
+            if display_range and unit_text:
+                display_range = f"{display_range} {unit_text}"
+
+        elif isinstance(reference_range, str):
+            display_range = reference_range
+
+        finding["reference_range"] = display_range
+
 
         # Match the template's expected description field.
         finding["what_it_measures"] = finding.get(

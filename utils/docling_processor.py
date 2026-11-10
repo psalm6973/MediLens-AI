@@ -1,196 +1,155 @@
-"""
-MediLens-AI Docling document extraction.
-
-Primary extraction uses Docling's table/layout pipeline with Tesseract CLI
-as Docling's internal OCR engine. This is NOT the separate external OCR
-fallback; it keeps extraction and table reconstruction inside Docling.
-
-Public interface:
-    extract_with_docling(file_path, save_debug=False) -> str
-"""
-
-from __future__ import annotations
-
+from pathlib import Path
 import json
 import logging
-import os
-import shutil
-from functools import lru_cache
-from pathlib import Path
-from typing import Any
 
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions,
-    TableStructureOptions,
-    TesseractCliOcrOptions,
-)
-from docling.document_converter import (
-    DocumentConverter,
-    ImageFormatOption,
-    PdfFormatOption,
-)
+from docling.document_converter import DocumentConverter
+
 
 logger = logging.getLogger(__name__)
 
 
-def _find_tesseract() -> str:
-    """Find Tesseract, including the common Windows installation path."""
-    configured = os.getenv("TESSERACT_CMD")
-    if configured and Path(configured).is_file():
-        return configured
-
-    from_path = shutil.which("tesseract")
-    if from_path:
-        return from_path
-
-    common_windows_path = Path(
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    )
-    if common_windows_path.is_file():
-        return str(common_windows_path)
-
-    # Let Docling/Tesseract produce a clear error if it is not installed.
-    return "tesseract"
-
-
-@lru_cache(maxsize=1)
-def get_converter() -> DocumentConverter:
+def _save_debug_files(result, markdown: str, source_path: Path) -> None:
     """
-    Create and cache one Docling converter.
+    Save Docling's original extraction output for inspection.
 
-    PSM 6 is selected because the reports in this dataset are mostly
-    structured laboratory-report pages with aligned text and tables.
+    These exports do not modify the extracted content.
     """
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = True
-    pipeline_options.do_table_structure = True
-    pipeline_options.table_structure_options = TableStructureOptions(
-        do_cell_matching=True
-    )
-    pipeline_options.ocr_options = TesseractCliOcrOptions(
-        lang=["eng"],
-        psm=6,
-        tesseract_cmd=_find_tesseract(),
-    )
-
-    # Keep one options object for both scanned PDFs and standalone images.
-    # ImageFormatOption uses Docling's standard layout/table pipeline too.
-    return DocumentConverter(
-        format_options={
-            InputFormat.IMAGE: ImageFormatOption(
-                pipeline_options=pipeline_options
-            ),
-            InputFormat.PDF: PdfFormatOption(
-                pipeline_options=pipeline_options
-            ),
-        }
-    )
-
-
-def _save_debug_files(result: Any, markdown: str, source_path: Path) -> Path:
-    """Save useful Docling outputs without changing the returned Markdown."""
-    debug_dir = Path("data") / "docling_debug" / source_path.stem
+    debug_dir = Path("data/docling_debug") / source_path.stem
     debug_dir.mkdir(parents=True, exist_ok=True)
 
-    (debug_dir / "document.md").write_text(markdown, encoding="utf-8")
+    # Save Markdown
+    (debug_dir / "document.md").write_text(
+        markdown,
+        encoding="utf-8"
+    )
 
+    # Save the complete Docling document structure
     try:
-        document_dict = result.document.export_to_dict()
-        (debug_dir / "document.json").write_text(
-            json.dumps(document_dict, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        logger.exception("Could not save Docling JSON debug export.")
+        document_data = result.document.export_to_dict()
 
-    table_summaries: list[str] = []
-    for index, table in enumerate(
-        getattr(result.document, "tables", []) or [], start=1
-    ):
+        with (debug_dir / "document.json").open(
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                document_data,
+                file,
+                indent=2,
+                ensure_ascii=False,
+                default=str
+            )
+
+    except Exception as error:
+        logger.warning("Could not export Docling JSON: %s", error)
+
+    # Save extracted tables
+    tables = getattr(result.document, "tables", [])
+
+    table_summary = [
+        f"Source: {source_path.name}",
+        f"Number of tables: {len(tables)}",
+        ""
+    ]
+
+    for index, table in enumerate(tables, start=1):
         try:
-            dataframe = table.export_to_dataframe(doc=result.document)
+            dataframe = table.export_to_dataframe(
+                doc=result.document
+            )
+
             csv_path = debug_dir / f"table_{index:02d}.csv"
-            dataframe.to_csv(csv_path, index=False, encoding="utf-8-sig")
+            dataframe.to_csv(csv_path, index=False)
 
-            html_path = debug_dir / f"table_{index:02d}.html"
-            html_path.write_text(
-                dataframe.to_html(index=False),
-                encoding="utf-8",
-            )
+            table_summary.extend([
+                f"Table {index}",
+                f"Rows: {len(dataframe)}",
+                f"Columns: {len(dataframe.columns)}",
+                f"CSV: {csv_path.name}",
+                ""
+            ])
 
-            table_summaries.append(
-                f"TABLE {index}\n"
-                f"Shape: {dataframe.shape[0]} rows x "
-                f"{dataframe.shape[1]} columns\n"
-                f"Columns: {list(dataframe.columns)}"
-            )
+            # HTML is optional; failure must not affect extraction.
+            try:
+                html = table.export_to_html(doc=result.document)
+
+                (debug_dir / f"table_{index:02d}.html").write_text(
+                    html,
+                    encoding="utf-8"
+                )
+            except Exception as error:
+                logger.warning(
+                    "Could not export HTML for table %s: %s",
+                    index,
+                    error
+                )
+
         except Exception as error:
-            table_summaries.append(
-                f"TABLE {index}\nCould not export table: {error}"
-            )
+            table_summary.extend([
+                f"Table {index}: export failed",
+                str(error),
+                ""
+            ])
 
-    summary = (
-        f"Source: {source_path}\n"
-        f"Detected tables: {len(getattr(result.document, 'tables', []) or [])}\n\n"
-        + ("\n\n".join(table_summaries) if table_summaries else "No tables detected.")
-    )
     (debug_dir / "table_summary.txt").write_text(
-        summary,
-        encoding="utf-8",
+        "\n".join(table_summary),
+        encoding="utf-8"
     )
-    return debug_dir
+
+    logger.info("Docling debug files saved to: %s", debug_dir)
 
 
 def extract_with_docling(
     file_path: str | Path,
-    save_debug: bool = False,
+    save_debug: bool = False
 ) -> str:
     """
-    Extract structured text and tables from a report using Docling.
+    Extract document content using Docling's default processing pipeline.
 
-    Args:
-        file_path: Path to a PDF or image report.
-        save_debug: When True, save Markdown, JSON, CSV/HTML tables,
-                    and a table summary under data/docling_debug/<filename>/.
-
-    Returns:
-        Extracted document content in Markdown format.
-
-    Raises:
-        FileNotFoundError: If the report does not exist.
-        ValueError: If Docling produces empty content.
-        RuntimeError: If document conversion fails.
+    Important:
+    - Uses DocumentConverter defaults.
+    - Does not force Tesseract or a custom OCR configuration.
+    - Does not apply report-specific corrections.
+    - Does not modify extracted values.
     """
-    path = Path(file_path)
 
-    if not path.is_file():
-        raise FileNotFoundError(f"Report file not found: {path}")
+    source_path = Path(file_path)
 
-    try:
-        converter = get_converter()
-        result = converter.convert(str(path))
+    if not source_path.exists():
+        raise FileNotFoundError(
+            f"Document not found: {source_path}"
+        )
 
-        extracted_text = result.document.export_to_markdown()
+    if not source_path.is_file():
+        raise ValueError(
+            f"Expected a file, received: {source_path}"
+        )
 
-        if not extracted_text or not extracted_text.strip():
-            raise ValueError(
-                "Docling could not extract readable content. "
-                "The report may require the separate OCR fallback."
+    logger.info("Starting Docling extraction: %s", source_path)
+
+    # Keep Docling's default OCR, layout and table-processing settings.
+    converter = DocumentConverter()
+
+    result = converter.convert(str(source_path))
+
+    markdown = result.document.export_to_markdown()
+
+    if markdown is None:
+        markdown = ""
+
+    if save_debug:
+        try:
+            _save_debug_files(
+                result=result,
+                markdown=markdown,
+                source_path=source_path
             )
+        except Exception:
+            # Debug-export failures must not destroy a successful extraction.
+            logger.exception("Could not save Docling debug files.")
 
-        extracted_text = extracted_text.strip()
+    logger.info(
+        "Docling extraction completed. Characters: %s",
+        len(markdown)
+    )
 
-        if save_debug:
-            debug_dir = _save_debug_files(result, extracted_text, path)
-            logger.info("Docling debug files saved to: %s", debug_dir)
-
-        return extracted_text
-
-    except ValueError:
-        raise
-    except Exception as error:
-        logger.exception("Docling extraction failed for %s", path)
-        raise RuntimeError(
-            f"Docling extraction failed: {error}"
-        ) from error
+    return markdown

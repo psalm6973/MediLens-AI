@@ -1,25 +1,32 @@
-
-# Environment and secrets
-.env
+# Virtual environments
 .venv/
-venv/
+.venv*/
 
-# Python cache
-__pycache__/
-*.py[cod]
-
-# Local database
-data/knowledge_base/chroma_db/
-
-# Downloaded datasets
+# Downloaded datasets and report images
 data/datasets/
 
-# Temporary files
-*.log
-.DS_Store
-Thumbs.db
+# Local Docling extraction/debug files
+data/docling_debug/
 
-# Test uploads
-uploads/
-# Medical reference PDFs
+# Local vector database
+data/knowledge_base/chroma_db/
+
+# Medical reference documents
 data/knowledge_base/documents/
+
+# Environment variables
+.env
+
+# Temporary files and backups
+*.log
+*.before_*.bak
+
+# Local experiments and manual checks
+scripts/experiments/
+scripts/manual_checks/
+local_only/
+project_structure.txt
+
+# Python and pytest caches
+__pycache__/
+.pytest_cache/
