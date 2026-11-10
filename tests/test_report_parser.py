@@ -10,7 +10,9 @@ def test_report_parser():
         Path(__file__).resolve().parents[1]
         / "data"
         / "datasets"
-        / "report-004.png"
+        / "ekacare"
+        / "images"
+        / "report_004.png"
     )
 
     assert file_path.exists(), f"Test image not found: {file_path}"

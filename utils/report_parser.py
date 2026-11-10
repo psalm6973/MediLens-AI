@@ -1,4 +1,3 @@
-
 from pathlib import Path
 from typing import Any
 import re
@@ -38,8 +37,11 @@ KNOWN_UNITS = {
     "iu", "au", "ratio", "index",
 }
 
+# Administrative fields must never be interpreted as medical test names.
 METADATA_RE = re.compile(
     r"^(?:ORDER NO|HH NO|ADM NO|NAME|PATIENT NAME|"
+    r"REGISTRATION ID|REGISTRATION NO|REGISTRATION NUMBER|"
+    r"CUSTOMER CARE|CONTACT|PHONE|MOBILE|EMAIL|"
     r"AGE|SEX|GENDER|DATE|LOCATION|REFERRED BY|"
     r"SAMPLE|WORK SHT|MAIN LAB|DEPARTMENT|"
     r"REPORT PRINTED|PAGE|CONSULTANT)\b",
@@ -204,6 +206,21 @@ def is_valid_test_label(name: str) -> bool:
         return False
 
     if METADATA_RE.search(name) or HEADER_RE.search(name):
+        return False
+
+    # Catch administrative labels even when OCR adds punctuation or spaces.
+    normalized_label = re.sub(r"[^a-z]", "", name.lower())
+    administrative_labels = {
+        "registrationid",
+        "registrationno",
+        "registrationnumber",
+        "customercare",
+        "contact",
+        "phone",
+        "mobile",
+        "email",
+    }
+    if normalized_label in administrative_labels:
         return False
 
     if re.fullmatch(r"[\d\s.,:/-]+", name):
@@ -465,6 +482,7 @@ def parse_generic_markdown_row(
             "Possible decimal/thousands-separator ambiguity; "
             "verify the original value"
         )
+
     return {
         "row_type": "primary",
         "test_name": normalize_test_name(label),
@@ -628,7 +646,9 @@ def parse_plain_text_row(line: str):
     # test results. Reject these before considering a numeric candidate.
     metadata_noise = re.search(
         r"\b(?:HN\s*\d{5,}|MRN\s*\d+|BARCODE|COLLECTED|REGISTERED|"
-        r"REPORTED|ACCEPTED|FEMALE|MALE|PATIENT|SAMPLE TYPE|REF CUSTOMER)\b|"
+        r"REGISTRATION\s*(?:ID|NO|NUMBER)|CUSTOMER\s*CARE|"
+        r"CONTACT|PHONE|MOBILE|EMAIL|REPORTED|ACCEPTED|"
+        r"FEMALE|MALE|PATIENT|SAMPLE TYPE|REF CUSTOMER)\b|"
         r"\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b",
         line,
         re.IGNORECASE,
@@ -636,7 +656,36 @@ def parse_plain_text_row(line: str):
     if metadata_noise:
         return None
 
-    match = PLAIN_ROW_RE.match(line.strip())
+    cleaned_line = line.strip()
+
+    # Targeted correction for the known OCR pattern:
+    # "MNAPTT 3 31.7 Seconds"
+    #
+    # In this exact pattern, OCR has inserted an extra standalone integer
+    # between the test label and the actual decimal result. Only accept this
+    # correction when the label and unit match this known row format.
+    mnaptt_match = re.match(
+        rf"^(?P<label>MNAPTT)\s+\d+\s+(?P<value>{NUMBER})\s+"
+        rf"(?P<right>Seconds?)\s*$",
+        cleaned_line,
+        re.IGNORECASE,
+    )
+
+    if mnaptt_match:
+        label = clean_text(mnaptt_match.group("label"))
+        value_text = mnaptt_match.group("value")
+        raw_unit = mnaptt_match.group("right")
+
+        return create_test_entry(
+            test_name=normalize_test_name(label),
+            value_text=value_text,
+            raw_unit=raw_unit,
+            raw_flag=None,
+            reference_range=None,
+            original_line=line,
+        )
+
+    match = PLAIN_ROW_RE.match(cleaned_line)
 
     if not match:
         return None
@@ -662,16 +711,27 @@ def parse_plain_text_row(line: str):
 
     # Keep a plausible result row even when OCR has damaged its unit/range,
     # but explicitly mark it for human verification.
-    if not raw_unit and not reference_range and not raw_flag and not re.search(r"\d|[<>]", right):
+    if (
+        not raw_unit
+        and not reference_range
+        and not raw_flag
+        and not re.search(r"\d|[<>]", right)
+    ):
         return None
 
     review_reasons = []
     if not raw_unit:
-        review_reasons.append("Unit is missing or unreadable in extracted text; verify the original report")
+        review_reasons.append(
+            "Unit is missing or unreadable in extracted text; verify the original report"
+        )
     if re.search(r"\d\s*,\s*\d+\s*[-–—]", right) and not reference_range:
-        review_reasons.append("Reference interval contains an ambiguous OCR comma; it was not interpreted")
+        review_reasons.append(
+            "Reference interval contains an ambiguous OCR comma; it was not interpreted"
+        )
     if re.search(r"(?:negative|positive)\s*[:.]?\s*[<>]", right, re.I):
-        review_reasons.append("Qualitative threshold is present; this parser does not encode threshold categories as numeric ranges")
+        review_reasons.append(
+            "Qualitative threshold is present; this parser does not encode threshold categories as numeric ranges"
+        )
 
     return create_test_entry(
         test_name=normalize_test_name(label),
@@ -780,7 +840,6 @@ def parse_plain_text(lines: list[str]):
     return results, unparsed_lines
 
 
-
 # ============================================================
 # 7. KNOWN MULTI-LAYOUT REPORT HANDLERS
 # ============================================================
@@ -818,19 +877,31 @@ def _parse_esr_layout(text: str):
     )
     if not block_match:
         return None
+
     block = block_match.group(1)
-    value_match = re.search(r"\b(\d{1,3}(?:\.\d+)?)\s*\.?\s*(?:mm\s*1st\s*Hour)?", block, re.I)
+    value_match = re.search(
+        r"\b(\d{1,3}(?:\.\d+)?)\s*\.?\s*(?:mm\s*1st\s*Hour)?",
+        block,
+        re.I,
+    )
     if not value_match:
         return None
 
     # The report contains separate male and female ranges and identifies the
     # patient as female. Keep the source's female interval.
     female_range = re.search(r"0\s*[-–]\s*20\s*\(Female\)", text, re.I)
-    reference = {"type": "range", "low": 0.0, "high": 20.0} if female_range else None
+    reference = (
+        {"type": "range", "low": 0.0, "high": 20.0}
+        if female_range else None
+    )
     value = value_match.group(1)
     original = value_match.group(0)
+
     entry = _make_entry(
-        "Erythrocyte Sedimentation Rate", value, "mm 1st Hour", reference,
+        "Erythrocyte Sedimentation Rate",
+        value,
+        "mm 1st Hour",
+        reference,
         original,
         ["OCR-rendered test/unit text is imperfect; verify against the original report"],
     )
@@ -839,46 +910,73 @@ def _parse_esr_layout(text: str):
 
 def _parse_crp_layout(text: str):
     # Restrict extraction to the result section to avoid values in explanatory text.
-    headings = list(re.finditer(r"##\s*C-Reactive Protein\s*\(CRP\)", text, re.I))
+    headings = list(re.finditer(
+        r"##\s*C-Reactive Protein\s*\(CRP\)",
+        text,
+        re.I,
+    ))
     if not headings:
         return None
+
     tail = text[headings[-1].end():]
     result_block = re.search(
-        r"RESULTS\s+(?P<value>\d+(?:\.\d+)?)\s+(?P<unit>mg\s*/\s*L)\s+BIOLOGICAL\s+REFERENCE\s*INYERVALS\s+(?P<low>\d+(?:\.\d+)?)\s*[-–]\s*(?P<high>\d+(?:\.\d+)?)",
+        r"RESULTS\s+(?P<value>\d+(?:\.\d+)?)\s+"
+        r"(?P<unit>mg\s*/\s*L)\s+"
+        r"BIOLOGICAL\s+REFERENCE\s*INYERVALS\s+"
+        r"(?P<low>\d+(?:\.\d+)?)\s*[-–]\s*"
+        r"(?P<high>\d+(?:\.\d+)?)",
         tail,
         re.I | re.S,
     )
     if not result_block:
         return None
+
     reference = {
         "type": "range",
         "low": float(result_block.group("low")),
         "high": float(result_block.group("high")),
     }
+
     return [_make_entry(
-        "C-Reactive Protein (CRP)", result_block.group("value"),
-        result_block.group("unit"), reference, result_block.group(0),
+        "C-Reactive Protein (CRP)",
+        result_block.group("value"),
+        result_block.group("unit"),
+        reference,
+        result_block.group(0),
     )]
 
 
 def _parse_rf_layout(text: str):
-    headings = list(re.finditer(r"##\s*Rheumatoid Factor\s*\(RA test\)", text, re.I))
+    headings = list(re.finditer(
+        r"##\s*Rheumatoid Factor\s*\(RA test\)",
+        text,
+        re.I,
+    ))
     if not headings:
         return None
+
     tail = text[headings[-1].end():]
     match = re.search(
-        r"RESULTS\s+UNITS\s+(?P<unit>10\s*/\s*mL)\s+(?P<limit>(?:&lt;|<)\s*\d+(?:\.\d+)?)\s+(?P<value>\d+(?:\.\d+)?)",
+        r"RESULTS\s+UNITS\s+(?P<unit>10\s*/\s*mL)\s+"
+        r"(?P<limit>(?:&lt;|<)\s*\d+(?:\.\d+)?)\s+"
+        r"(?P<value>\d+(?:\.\d+)?)",
         tail,
         re.I | re.S,
     )
     if not match:
         return None
+
     # The source gives an upper-only limit (<18). The existing result schema
     # supports two-sided ranges only, so do not invent a lower bound.
     entry = _make_entry(
-        "Rheumatoid Factor (RA test)", match.group("value"),
-        match.group("unit"), None, match.group(0),
-        ["Source reference is an upper-only limit (<18), which is not represented as a numeric range in this parser"],
+        "Rheumatoid Factor (RA test)",
+        match.group("value"),
+        match.group("unit"),
+        None,
+        match.group(0),
+        [
+            "Source reference is an upper-only limit (<18), which is not represented as a numeric range in this parser"
+        ],
     )
     return [entry]
 
@@ -889,19 +987,42 @@ def _parse_urine_layout(text: str):
 
     results = []
     specs = [
-        ("Urine Protein", r"Urine\s*Protein\s+(\d+(?:\.\d+)?)", "mg/dL", None),
-        ("Urine Creatinine", r"Urine\s*Creatinine\s+(\d+(?:\.\d+)?)", "mg/dL", {"type": "range", "low": 16.0, "high": 327.0}),
-        ("Protein Creatinine Ratio", r"Protein\s+Creatinine\s+Ratio\s+(\d+(?:\.\d+)?)", None, {"type": "range", "low": 0.0, "high": 0.2}),
+        (
+            "Urine Protein",
+            r"Urine\s*Protein\s+(\d+(?:\.\d+)?)",
+            "mg/dL",
+            None,
+        ),
+        (
+            "Urine Creatinine",
+            r"Urine\s*Creatinine\s+(\d+(?:\.\d+)?)",
+            "mg/dL",
+            {"type": "range", "low": 16.0, "high": 327.0},
+        ),
+        (
+            "Protein Creatinine Ratio",
+            r"Protein\s+Creatinine\s+Ratio\s+(\d+(?:\.\d+)?)",
+            None,
+            {"type": "range", "low": 0.0, "high": 0.2},
+        ),
     ]
+
     for name, pattern, unit, reference in specs:
         match = re.search(pattern, text, re.I)
         if not match:
             continue
+
         # Preserve the exact source phrase around each value for auditability.
         start = max(0, match.start() - 30)
         end = min(len(text), match.end() + 100)
         original = clean_text(text[start:end])
-        results.append(_make_entry(name, match.group(1), unit, reference, original))
+        results.append(_make_entry(
+            name,
+            match.group(1),
+            unit,
+            reference,
+            original,
+        ))
 
     return results or None
 
@@ -917,9 +1038,15 @@ def _parse_ccp_layout(text: str):
         # isolated numbers from patient demographics or report identifiers.
         if not re.search(r"Cyclic", line, re.I) or not re.search(r"Pep", line, re.I):
             continue
-        match = re.search(r"(?P<value>\d{1,3}\.\d{1,3})\s*(?P<unit>AU)\b", line, re.I)
+
+        match = re.search(
+            r"(?P<value>\d{1,3}\.\d{1,3})\s*(?P<unit>AU)\b",
+            line,
+            re.I,
+        )
         if not match:
             continue
+
         return [_make_entry(
             "Anti-Cyclic Citrullinated Peptide Antibody (CCP)",
             match.group("value"),
@@ -931,15 +1058,23 @@ def _parse_ccp_layout(text: str):
                 "OCR damaged part of the test label; canonical name inferred from the report heading",
             ],
         )]
+
     return None
 
 
 def parse_known_layout(text: str):
     """Parse report layouts whose extracted text is known to be split across cells."""
-    for parser in (_parse_esr_layout, _parse_crp_layout, _parse_rf_layout, _parse_urine_layout, _parse_ccp_layout):
+    for parser in (
+        _parse_esr_layout,
+        _parse_crp_layout,
+        _parse_rf_layout,
+        _parse_urine_layout,
+        _parse_ccp_layout,
+    ):
         result = parser(text)
         if result:
             return result
+
     return None
 
 
@@ -950,12 +1085,19 @@ def parse_known_layout(text: str):
 def parse_report_text(text: str) -> dict[str, Any]:
     if not isinstance(text, str):
         raise TypeError("Report text must be a string.")
+
     if not text.strip():
         raise ValueError("Report text is empty.")
 
     # Docling may return only image placeholders. This is an extraction failure,
     # not a parser failure and must never be reported as a successful empty parse.
-    meaningful_text = re.sub(r"<!--\s*image\s*-->", "", text, flags=re.I).strip()
+    meaningful_text = re.sub(
+        r"<!--\s*image\s*-->",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+
     if not meaningful_text:
         return {
             "results": [],
@@ -963,10 +1105,16 @@ def parse_report_text(text: str) -> dict[str, Any]:
             "unparsed_lines": [],
             "result_count": 0,
             "unassigned_value_count": 0,
-            "parser_version": "7.2-layout",
+            "parser_version": "7.3-layout",
             "status": "extraction_failed",
-            "failure_reason": "Docling output contains no readable text; OCR or another extraction method is required.",
-            "disclaimer": "No report values were extracted. Do not perform medical analysis on this document.",
+            "failure_reason": (
+                "Docling output contains no readable text; "
+                "OCR or another extraction method is required."
+            ),
+            "disclaimer": (
+                "No report values were extracted. "
+                "Do not perform medical analysis on this document."
+            ),
         }
 
     known_results = parse_known_layout(meaningful_text)
@@ -977,15 +1125,22 @@ def parse_report_text(text: str) -> dict[str, Any]:
             "unparsed_lines": [],
             "result_count": len(known_results),
             "unassigned_value_count": 0,
-            "parser_version": "7.2-layout",
+            "parser_version": "7.3-layout",
             "status": "success",
             "disclaimer": (
-                "Extracted values are unverified report candidates. Test names, values, units and reference ranges must be checked against the original report. "
-                "This parser does not provide medical diagnoses or treatment recommendations."
+                "Extracted values are unverified report candidates. "
+                "Test names, values, units and reference ranges must be "
+                "checked against the original report. "
+                "This parser does not provide medical diagnoses or "
+                "treatment recommendations."
             ),
         }
 
-    lines = [clean_text(line) for line in meaningful_text.splitlines() if line.strip()]
+    lines = [
+        clean_text(line)
+        for line in meaningful_text.splitlines()
+        if line.strip()
+    ]
 
     # OCR output can contain vertical bars from a photographed table.
     # Treat it as Markdown only when a recognized header is followed by
@@ -1000,10 +1155,10 @@ def parse_report_text(text: str) -> dict[str, Any]:
 
     if has_markdown_table:
         results, unparsed_lines = parse_markdown_tables(lines)
-        parser_version = "7.2-markdown"
+        parser_version = "7.3-markdown"
     else:
         results, unparsed_lines = parse_plain_text(lines)
-        parser_version = "7.2-plain"
+        parser_version = "7.3-plain"
 
     return {
         "results": results,
@@ -1013,16 +1168,23 @@ def parse_report_text(text: str) -> dict[str, Any]:
         "unassigned_value_count": 0,
         "parser_version": parser_version,
         "status": "success" if results else "parsing_failed",
-        "failure_reason": None if results else "Readable text was extracted, but no report result rows could be parsed.",
+        "failure_reason": (
+            None
+            if results
+            else "Readable text was extracted, but no report result rows could be parsed."
+        ),
         "disclaimer": (
-            "Extracted values are unverified report candidates. Test names, values, units and reference ranges must be checked against the original report. "
-            "This parser does not provide medical diagnoses or treatment recommendations."
+            "Extracted values are unverified report candidates. "
+            "Test names, values, units and reference ranges must be "
+            "checked against the original report. "
+            "This parser does not provide medical diagnoses or "
+            "treatment recommendations."
         ),
     }
 
 
 # ============================================================
-# 8. PARSE TEXT FILE
+# 9. PARSE TEXT FILE
 # ============================================================
 
 def parse_report_file(file_path: str) -> dict[str, Any]:

@@ -18,3 +18,5 @@ sentence-transformers
 pytest
 httpx
 opencv-python
+
+docling
