@@ -8,13 +8,6 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from agents.document_reader import document_reader_agent
-from agents.medical_analysis import (
-    medical_analysis_agent,
-    validate_medical_analysis,
-)
-from agents.safety_care import safety_care_agent
-
 
 # ==================================================
 # APPLICATION SETUP
@@ -47,10 +40,6 @@ def run_medilens(file_path: str) -> dict:
 
     report_path = Path(file_path)
 
-    # --------------------------------------------------
-    # AGENT 1: DOCUMENT READER
-    # --------------------------------------------------
-
     if not report_path.is_file():
         return {
             "status": "error",
@@ -59,7 +48,14 @@ def run_medilens(file_path: str) -> dict:
             "message": "The uploaded report could not be found.",
         }
 
+    # --------------------------------------------------
+    # AGENT 1: DOCUMENT READER
+    # Import only when a report is uploaded.
+    # --------------------------------------------------
+
     try:
+        from agents.document_reader import document_reader_agent
+
         document_result = document_reader_agent(str(report_path))
 
         if not isinstance(document_result, dict):
@@ -126,12 +122,18 @@ def run_medilens(file_path: str) -> dict:
 
     # --------------------------------------------------
     # AGENT 2: MEDICAL ANALYSIS
+    # Import only after extraction succeeds.
     # --------------------------------------------------
 
     try:
+        from agents.medical_analysis import (
+            medical_analysis_agent,
+            validate_medical_analysis,
+        )
+
         medical_analysis = medical_analysis_agent(
             parsed_report,
-            document_metadata
+            document_metadata,
         )
 
         if not isinstance(medical_analysis, dict):
@@ -169,9 +171,12 @@ def run_medilens(file_path: str) -> dict:
 
     # --------------------------------------------------
     # AGENT 3: SAFETY CARE
+    # Import only after medical analysis succeeds.
     # --------------------------------------------------
 
     try:
+        from agents.safety_care import safety_care_agent
+
         safety_result = safety_care_agent(medical_analysis)
 
         if not isinstance(safety_result, dict):
@@ -230,7 +235,6 @@ def run_medilens(file_path: str) -> dict:
         "review_required", True
     )
 
-    # Recheck analysis status after Safety Care.
     analysis_needs_review = (
         final_analysis.get("status") != "success"
     )
@@ -246,15 +250,17 @@ def run_medilens(file_path: str) -> dict:
         or safety_needs_review
     )
 
-    if analysis_needs_review:
-        analysis_status = "needs_review"
-    else:
-        analysis_status = "success"
+    analysis_status = (
+        "needs_review"
+        if analysis_needs_review
+        else "success"
+    )
 
-    if safety_needs_review:
-        safety_status = "needs_review"
-    else:
-        safety_status = "passed_checks"
+    safety_status = (
+        "needs_review"
+        if safety_needs_review
+        else "passed_checks"
+    )
 
     common_result = {
         "stage": "completed",
@@ -407,7 +413,7 @@ async def analyze_report(file: UploadFile = File(...)):
 
         return result
 
-    except Exception as error:
+    except Exception:
         print("\n--- UPLOAD API ERROR ---")
         traceback.print_exc()
         print("-----------------------\n")
@@ -418,7 +424,7 @@ async def analyze_report(file: UploadFile = File(...)):
                 "An unexpected error occurred while processing "
                 "the report."
             ),
-        ) from error
+        )
 
     finally:
         if temporary_path and temporary_path.exists():
